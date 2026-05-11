@@ -1,0 +1,56 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Editable installs
+src/*.egg-link
+
+# Virtual environments
+venv/
+.venv/
+env/
+.env
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.tox/
+.coverage
+htmlcov/
+.hypothesis/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Notebook checkpoints
+.ipynb_checkpoints/
+
+# Forge runtime artifacts
+runs/
+*.tsv
+*.jsonl
+trace.json
+result.json
+recipe.yaml
+.forge/
+
+# vLLM cache
+.vllm/
+
+# Local secrets
+.env.local
+*.key

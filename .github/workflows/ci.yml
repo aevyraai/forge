@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Lint — ruff format + ruff check + mypy
+  # ---------------------------------------------------------------------------
+  lint:
+    name: Lint (ruff + mypy)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      # witness isn't on PyPI yet — install from a sibling checkout once it is
+      # TODO: replace with the pinned aevyra-witness release when published.
+      - name: Install dev dependencies
+        run: pip install -e ".[dev]"
+
+      - name: ruff format
+        run: ruff format --check .
+
+      - name: ruff check
+        run: ruff check .
+
+      - name: mypy
+        run: mypy --strict src/aevyra_forge
+        continue-on-error: true   # turn off once strict typing settles
+
+  # ---------------------------------------------------------------------------
+  # Notebooks — execute Colab quickstart end-to-end against the public release
+  # ---------------------------------------------------------------------------
+  # The notebooks are the first thing every evaluator runs. CI must catch
+  # bitrot before users do. See notebooks/README.md for what runs here.
+  # Enable once notebooks land.
+  notebooks:
+    name: Notebooks (smoke)
+    runs-on: ubuntu-latest
+    if: false   # TODO: enable when notebooks/forge_quickstart.ipynb exists
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - run: pip install -e ".[dev]" nbconvert nbclient
+      - run: jupyter nbconvert --to notebook --execute notebooks/forge_quickstart.ipynb
+
+  # ---------------------------------------------------------------------------
+  # Tests — placeholder. Real tests land alongside real module bodies.
+  # ---------------------------------------------------------------------------
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    if: false   # TODO: enable when tests/ exists
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - run: pip install -e ".[dev]"
+      - run: pytest tests/ -v

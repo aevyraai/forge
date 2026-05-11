@@ -1,0 +1,72 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aevyra-forge"
+version = "0.0.1"
+description = "Autonomous overnight optimizer for LLM inference deployments — tune vLLM config, quantization, and kernels jointly against your real workload."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+authors = [
+    { name = "Aevyra AI" },
+]
+
+keywords = [
+    "vllm", "llm-serving", "inference-optimization", "quantization",
+    "autotuning", "amd", "mi300x", "aevyra",
+]
+
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+# Keep core deps light — Forge should pip install cleanly in Colab in <30s.
+# Anything heavy (torch, transformers, vllm) goes behind an extra.
+dependencies = [
+    "aevyra-witness>=0.1.0",
+    "anthropic>=0.30",          # default agent backend
+    "httpx>=0.27",              # talk to the running vLLM server
+    "pyyaml>=6.0",              # recipe serialization
+]
+
+[project.optional-dependencies]
+# OpenRouter / OpenAI-compat agent backend
+openai = ["openai>=2.31.0"]
+# vLLM is the v0 engine — user installs this on the GPU host
+vllm = ["vllm>=0.10"]
+# AMD-specific extras (ROCm, Quark, AITER) — placeholder for future
+amd = []
+# Everything
+all = ["openai>=2.31.0", "vllm>=0.10"]
+# Development
+dev = [
+    "pytest>=9.0",
+    "ruff>=0.4",
+    "mypy>=1.10",
+    "typer>=0.24.1",
+    "openai>=2.31.0",
+]
+
+[project.scripts]
+forge = "aevyra_forge.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.mypy]
+strict = true
+python_version = "3.10"
+files = ["src/aevyra_forge"]
