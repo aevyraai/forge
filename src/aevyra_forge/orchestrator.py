@@ -191,6 +191,27 @@ class Orchestrator:
                 logger.info("forge │  rationale : %s", decision.rationale)
                 logger.info("forge │  mutation  : %s", decision.mutation.get("changes", {}))
 
+                # Reject mutations that exactly match a previous CRASH or FAIL attempt
+                proposed_changes = decision.mutation.get("changes", {})
+                _already_tried = self._find_duplicate(history, proposed_changes)
+                if _already_tried:
+                    logger.warning(
+                        "forge │  skipping duplicate mutation %s — already tried as exp %s (%s)",
+                        proposed_changes,
+                        _already_tried.id,
+                        _already_tried.bench_result.status if _already_tried.bench_result else "?",
+                    )
+                    exp = Experiment(
+                        id=f"dup-{len(history)}",
+                        recipe=current_recipe,
+                        agent_decision=decision,
+                        score=0.0,
+                        kept=False,
+                    )
+                    self.store.append(exp)
+                    history = self.store.history()
+                    continue
+
                 # Apply mutation
                 try:
                     from aevyra_forge import config as config_mod
@@ -593,6 +614,31 @@ class Orchestrator:
                 return True
 
         return False
+
+    def _find_duplicate(
+        self, history: list[Experiment], proposed_changes: dict
+    ) -> "Experiment | None":
+        """Return a previous experiment whose changes are a superset of
+        ``proposed_changes`` AND whose result was CRASH, FAIL, or score=0.
+
+        This prevents the agent from re-proposing a mutation that already
+        failed, regardless of how the prompt constraint is phrased.
+        """
+        if not proposed_changes:
+            return None
+        for exp in history:
+            if not exp.agent_decision:
+                continue
+            past_changes = exp.agent_decision.mutation.get("changes", {})
+            # All proposed keys must match the past experiment's values
+            if not all(past_changes.get(k) == v for k, v in proposed_changes.items()):
+                continue
+            br = exp.bench_result
+            if br and br.status in ("CRASH", "FAIL"):
+                return exp
+            if exp.score == 0.0 and not exp.kept:
+                return exp
+        return None
 
     def _print_table(self, history: list[Experiment]) -> None:
         """Print a compact results table to stdout after each experiment."""
