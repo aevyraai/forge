@@ -88,7 +88,28 @@ class VLLMRunner:
         self.work_dir.mkdir(parents=True, exist_ok=True)
         logger.info("Starting vLLM: %s", " ".join(args))
         self._log_file = log_path.open("w")
-        self._process = subprocess.Popen(args, stdout=self._log_file, stderr=subprocess.STDOUT)
+
+        # Tee vLLM output to the log file AND to stderr so it's visible in
+        # notebooks and terminal sessions without needing to tail a file.
+        import sys
+        import threading
+
+        self._process = subprocess.Popen(
+            args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
+        )
+
+        def _tee(proc: subprocess.Popen, log_file: object) -> None:
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                decoded = line.decode("utf-8", errors="replace")
+                sys.stderr.write(decoded)
+                log_file.write(decoded)  # type: ignore[attr-defined]
+                log_file.flush()         # type: ignore[attr-defined]
+
+        self._tee_thread = threading.Thread(
+            target=_tee, args=(self._process, self._log_file), daemon=True
+        )
+        self._tee_thread.start()
 
         try:
             import httpx
@@ -96,6 +117,7 @@ class VLLMRunner:
             raise ImportError("runner requires httpx: pip install aevyra-forge[vllm]") from e
 
         deadline = time.time() + self.startup_timeout_s
+        elapsed_intervals = 0
         while time.time() < deadline:
             try:
                 r = httpx.get(f"{self.url()}/health", timeout=2.0)
@@ -105,10 +127,16 @@ class VLLMRunner:
             except Exception:
                 pass
             if self._process.poll() is not None:
+                self._tee_thread.join(timeout=2)
                 raise RuntimeError(
                     f"vLLM process exited early (code {self._process.returncode}). "
                     f"See {log_path} for details."
                 )
+            elapsed_intervals += 1
+            if elapsed_intervals % 15 == 0:
+                # Heartbeat every 30s so the user knows we're still waiting
+                elapsed_s = elapsed_intervals * 2
+                logger.info("Waiting for vLLM to start... (%ds elapsed)", elapsed_s)
             time.sleep(2)
 
         self.stop()
@@ -137,6 +165,9 @@ class VLLMRunner:
         except ProcessLookupError:
             pass
         finally:
+            tee_thread = getattr(self, "_tee_thread", None)
+            if tee_thread:
+                tee_thread.join(timeout=3)
             log_file = getattr(self, "_log_file", None)
             if log_file:
                 log_file.close()
