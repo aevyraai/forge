@@ -50,7 +50,7 @@ def load_playbook(path: str | Path) -> Playbook:
         end = raw.find("---", 3)
         if end != -1:
             metadata = _yaml.safe_load(raw[3:end]) or {}
-            body = raw[end + 3:].lstrip("\n")
+            body = raw[end + 3 :].lstrip("\n")
 
     # Split body into sections on ## headings
     sections: dict[str, str] = {}

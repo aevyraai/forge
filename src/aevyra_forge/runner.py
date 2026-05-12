@@ -83,12 +83,45 @@ class VLLMRunner:
             self._process = None
             return
 
+        import os
+
+        # Default vLLM to WARNING to keep output clean.
+        # Users can override by setting VLLM_LOGGING_LEVEL=INFO before running.
+        if "VLLM_LOGGING_LEVEL" not in os.environ:
+            os.environ["VLLM_LOGGING_LEVEL"] = "WARNING"
+            logger.info(
+                "forge │  vLLM logs suppressed (WARNING level). "
+                "Set VLLM_LOGGING_LEVEL=INFO to enable."
+            )
+
         args = ["vllm", "serve"] + build_vllm_args(self.recipe)
+        # Suppress uvicorn access logs (separate from VLLM_LOGGING_LEVEL)
+        if os.environ.get("VLLM_LOGGING_LEVEL", "WARNING").upper() == "WARNING":
+            args += ["--uvicorn-log-level", "warning"]
         log_path = self.work_dir / f"vllm_{self.recipe.id}.log"
         self.work_dir.mkdir(parents=True, exist_ok=True)
-        logger.info("Starting vLLM: %s", " ".join(args))
+        logger.info("forge │  starting vLLM  log → %s", log_path)
         self._log_file = log_path.open("w")
-        self._process = subprocess.Popen(args, stdout=self._log_file, stderr=subprocess.STDOUT)
+
+        # Tee vLLM output to the log file AND to stderr so it's visible in
+        # notebooks and terminal sessions without needing to tail a file.
+        import sys
+        import threading
+
+        self._process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+
+        def _tee(proc: subprocess.Popen, log_file: object) -> None:
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                decoded = line.decode("utf-8", errors="replace")
+                sys.stderr.write(decoded)
+                log_file.write(decoded)  # type: ignore[attr-defined]
+                log_file.flush()  # type: ignore[attr-defined]
+
+        self._tee_thread = threading.Thread(
+            target=_tee, args=(self._process, self._log_file), daemon=True
+        )
+        self._tee_thread.start()
 
         try:
             import httpx
@@ -96,6 +129,7 @@ class VLLMRunner:
             raise ImportError("runner requires httpx: pip install aevyra-forge[vllm]") from e
 
         deadline = time.time() + self.startup_timeout_s
+        elapsed_intervals = 0
         while time.time() < deadline:
             try:
                 r = httpx.get(f"{self.url()}/health", timeout=2.0)
@@ -105,16 +139,21 @@ class VLLMRunner:
             except Exception:
                 pass
             if self._process.poll() is not None:
+                self._tee_thread.join(timeout=2)
                 raise RuntimeError(
                     f"vLLM process exited early (code {self._process.returncode}). "
                     f"See {log_path} for details."
                 )
+            elapsed_intervals += 1
+            if elapsed_intervals % 15 == 0:
+                # Heartbeat every 30s so the user knows we're still waiting
+                elapsed_s = elapsed_intervals * 2
+                logger.info("Waiting for vLLM to start... (%ds elapsed)", elapsed_s)
             time.sleep(2)
 
         self.stop()
         raise TimeoutError(
-            f"vLLM did not become healthy within {self.startup_timeout_s}s. "
-            f"See {log_path}."
+            f"vLLM did not become healthy within {self.startup_timeout_s}s. See {log_path}."
         )
 
     def stop(self) -> None:
@@ -137,6 +176,9 @@ class VLLMRunner:
         except ProcessLookupError:
             pass
         finally:
+            tee_thread = getattr(self, "_tee_thread", None)
+            if tee_thread:
+                tee_thread.join(timeout=3)
             log_file = getattr(self, "_log_file", None)
             if log_file:
                 log_file.close()
@@ -147,6 +189,7 @@ class VLLMRunner:
     def is_healthy(self) -> bool:
         try:
             import httpx
+
             r = httpx.get(f"{self.url()}/health", timeout=2.0)
             return r.status_code == 200
         except Exception:
@@ -169,7 +212,16 @@ def build_vllm_args(recipe: Recipe) -> list[str]:
     args += ["--max-num-batched-tokens", str(cfg.max_num_batched_tokens)]
     args += ["--block-size", str(cfg.block_size)]
     args += ["--gpu-memory-utilization", str(cfg.gpu_memory_utilization)]
-    args += ["--swap-space", str(cfg.swap_space)]
+    if cfg.swap_space > 0:
+        # --swap-space was removed in vLLM 0.6+; skip silently if zero
+        try:
+            import subprocess
+
+            result = subprocess.run(["vllm", "serve", "--help"], capture_output=True, text=True)
+            if "--swap-space" in result.stdout or "--swap-space" in result.stderr:
+                args += ["--swap-space", str(cfg.swap_space)]
+        except Exception:
+            pass
     args += ["--kv-cache-dtype", cfg.kv_cache_dtype]
     args += ["--tensor-parallel-size", str(cfg.tensor_parallel_size)]
     args += ["--pipeline-parallel-size", str(cfg.pipeline_parallel_size)]
@@ -181,7 +233,11 @@ def build_vllm_args(recipe: Recipe) -> list[str]:
     if cfg.attention_backend:
         args += ["--attention-backend", cfg.attention_backend]
     if cfg.speculative_model:
-        args += ["--speculative-model", cfg.speculative_model,
-                 "--num-speculative-tokens", str(cfg.num_speculative_tokens)]
+        args += [
+            "--speculative-model",
+            cfg.speculative_model,
+            "--num-speculative-tokens",
+            str(cfg.num_speculative_tokens),
+        ]
 
     return args

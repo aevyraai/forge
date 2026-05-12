@@ -53,6 +53,7 @@ class Experiment:
     duration_s: float = 0.0
     started_at: float = 0.0
     ended_at: float = 0.0
+    llm_tokens: int = 0
 
 
 @dataclass
@@ -114,7 +115,6 @@ class Orchestrator:
         import time
 
         from aevyra_forge import config as config_mod
-        from aevyra_forge.bench import score as bench_score
         from aevyra_forge.recipe import Recipe
 
         self._run_start = time.time()
@@ -129,7 +129,7 @@ class Orchestrator:
         )
 
         # Run baseline experiment
-        logger.info("Running baseline experiment...")
+        logger.info("forge ┌─ experiment 0/%d  [baseline]", self.cfg.max_experiments)
         baseline_exp = self._run_one(baseline_recipe, agent_decision=None)
         baseline_exp.kept = True
         self.store.append(baseline_exp)
@@ -139,9 +139,10 @@ class Orchestrator:
         best_score = baseline_exp.score or 0.0
 
         logger.info(
-            "Baseline score=%.4f (throughput=%.1f tok/s)",
+            "forge └─ baseline  score=%.1f tok/s  p99=%.0fms  status=%s",
             best_score,
-            baseline_exp.bench_result.throughput_tokens_per_sec if baseline_exp.bench_result else 0.0,
+            baseline_exp.bench_result.p99_latency_ms if baseline_exp.bench_result else 0.0,
+            baseline_exp.bench_result.status if baseline_exp.bench_result else "?",
         )
 
         while not self._is_converged(history) and not self._budget_exhausted(history):
@@ -150,8 +151,16 @@ class Orchestrator:
                 current_layer = self._should_escalate(history, current_layer)
 
             # Ask agent for next mutation
+            exp_n = len(history)
+            logger.info(
+                "forge │  experiment %d/%d — asking agent...",
+                exp_n,
+                self.cfg.max_experiments,
+            )
+            _tokens_before = getattr(self.llm, "tokens_used", 0)
             try:
                 from aevyra_forge import agent as agent_mod
+
                 decision = agent_mod.propose_next_experiment(
                     history=history,
                     playbook=self.playbook,
@@ -160,17 +169,28 @@ class Orchestrator:
                     llm=self.llm,
                 )
             except Exception as exc:
-                logger.warning("Agent call failed: %s — skipping experiment", exc)
+                logger.warning("forge │  agent call failed: %s — skipping", exc)
                 continue
+            _exp_tokens = getattr(self.llm, "tokens_used", 0) - _tokens_before
+            logger.info("forge │  tokens    : %d", _exp_tokens)
 
             # Empty changes = agent says converged
             if not decision.mutation.get("changes"):
-                logger.info("Agent returned empty mutation — search converged.")
+                logger.info("forge │  agent returned empty mutation — converged.")
                 break
+
+            logger.info(
+                "forge ┌─ experiment %d/%d",
+                exp_n,
+                self.cfg.max_experiments,
+            )
+            logger.info("forge │  rationale : %s", decision.rationale)
+            logger.info("forge │  mutation  : %s", decision.mutation.get("changes", {}))
 
             # Apply mutation
             try:
                 from aevyra_forge import config as config_mod
+
                 candidate = config_mod.mutate(current_recipe, decision.mutation)
             except (ValueError, NotImplementedError) as exc:
                 logger.warning("Mutation rejected: %s", exc)
@@ -188,25 +208,34 @@ class Orchestrator:
 
             # Run experiment
             exp = self._run_one(candidate, agent_decision=decision)
+            exp.llm_tokens = _exp_tokens
 
             # Keep or revert
             improvement_threshold = best_score * (1 + self.cfg.min_improvement_pct / 100)
+            p99 = exp.bench_result.p99_latency_ms if exp.bench_result else 0.0
+            dur = exp.duration_s
             if exp.score is not None and exp.score > improvement_threshold:
                 exp.kept = True
+                gain = 100 * (exp.score - best_score) / max(best_score, 1e-9)
                 current_recipe = candidate
                 best_score = exp.score
                 logger.info(
-                    "[%s] KEPT  score=%.4f (+%.1f%%) layer=%s rationale=%r",
-                    exp.id, exp.score,
-                    100 * (exp.score - best_score) / max(best_score, 1e-9),
-                    current_layer,
-                    decision.rationale[:60],
+                    "forge └─ ✓ KEPT      score=%.1f tok/s  p99=%.0fms  +%.1f%%  duration=%.0fs  llm=%d tok",
+                    exp.score,
+                    p99,
+                    gain,
+                    dur,
+                    exp.llm_tokens,
                 )
             else:
                 exp.kept = False
                 logger.info(
-                    "[%s] REVERTED score=%.4f (best=%.4f) layer=%s",
-                    exp.id, exp.score or 0.0, best_score, current_layer,
+                    "forge └─ ✗ REVERTED  score=%.1f tok/s  p99=%.0fms  best=%.1f  duration=%.0fs  llm=%d tok",
+                    exp.score or 0.0,
+                    p99,
+                    best_score,
+                    dur,
+                    exp.llm_tokens,
                 )
 
             self.store.append(exp)
@@ -214,10 +243,29 @@ class Orchestrator:
 
         best_exp = self.store.best()
         best_recipe = best_exp.recipe if best_exp else baseline_recipe
-        logger.info(
-            "Forge finished. Best score=%.4f after %d experiments.",
-            best_score, len(history),
-        )
+        baseline_score = history[0].score or 0.0
+        total_gain = 100 * (best_score - baseline_score) / max(baseline_score, 1e-9)
+        elapsed = time.time() - self._run_start
+        kept_count = sum(1 for e in history if e.kept)
+        total_llm_tokens = sum(e.llm_tokens for e in history)
+        logger.info("forge ══════════════════════════════════════════")
+        logger.info("forge   total experiments : %d", len(history))
+        logger.info("forge   kept              : %d", kept_count)
+        logger.info("forge   baseline score    : %.1f tok/s", baseline_score)
+        logger.info("forge   best score        : %.1f tok/s  (+%.1f%%)", best_score, total_gain)
+        logger.info("forge   wall time         : %.0f min", elapsed / 60)
+        logger.info("forge   llm tokens used   : %d", total_llm_tokens)
+        logger.info("forge   best recipe gen   : %d  id=%s", best_recipe.generation, best_recipe.id)
+        logger.info("forge ══════════════════════════════════════════")
+
+        analysis = self._generate_analysis(history, baseline_score, best_score, elapsed)
+        if analysis:
+            print("\n" + "─" * 60)
+            print("  Forge Analysis")
+            print("─" * 60)
+            print(analysis)
+            print("─" * 60 + "\n")
+
         return best_recipe, history
 
     def resume(self) -> tuple[Recipe, list[Experiment]]:
@@ -241,7 +289,9 @@ class Orchestrator:
 
         logger.info(
             "Resuming from experiment %s with best_score=%.4f (%d experiments in history)",
-            best_exp.id, best_score, len(history),
+            best_exp.id,
+            best_score,
+            len(history),
         )
 
         while not self._is_converged(history) and not self._budget_exhausted(history):
@@ -250,6 +300,7 @@ class Orchestrator:
 
             try:
                 from aevyra_forge import agent as agent_mod
+
                 decision = agent_mod.propose_next_experiment(
                     history=history,
                     playbook=self.playbook,
@@ -267,6 +318,7 @@ class Orchestrator:
 
             try:
                 from aevyra_forge import config as config_mod
+
                 candidate = config_mod.mutate(current_recipe, decision.mutation)
             except (ValueError, NotImplementedError) as exc:
                 logger.warning("Mutation rejected: %s", exc)
@@ -376,15 +428,18 @@ class Orchestrator:
 
         # Count recent experiments at current layer
         recent = [
-            e for e in history
+            e
+            for e in history
             if e.agent_decision and e.agent_decision.mutation.get("layer") == current_layer
-        ][-self.cfg.convergence_window:]
+        ][-self.cfg.convergence_window :]
 
         if len(recent) >= self.cfg.convergence_window and not any(e.kept for e in recent):
             next_layer = _layer_order[idx + 1]
             logger.info(
                 "Layer %s saturated (%d consecutive non-improvements) — escalating to %s",
-                current_layer, self.cfg.convergence_window, next_layer,
+                current_layer,
+                self.cfg.convergence_window,
+                next_layer,
             )
             return next_layer
 
@@ -397,7 +452,7 @@ class Orchestrator:
         if len(history) < self.cfg.convergence_window:
             return False
 
-        recent = history[-self.cfg.convergence_window:]
+        recent = history[-self.cfg.convergence_window :]
         # If any experiment in the window was kept, we haven't converged
         if any(e.kept for e in recent):
             return False
@@ -419,7 +474,9 @@ class Orchestrator:
         if improvement < self.cfg.min_improvement_pct:
             logger.info(
                 "Convergence detected: best improvement in last %d experiments = %.2f%% < %.1f%%",
-                self.cfg.convergence_window, improvement, self.cfg.min_improvement_pct,
+                self.cfg.convergence_window,
+                improvement,
+                self.cfg.min_improvement_pct,
             )
             return True
 
@@ -432,7 +489,8 @@ class Orchestrator:
         if len(history) >= self.cfg.max_experiments:
             logger.info(
                 "Budget exhausted: %d experiments reached (max=%d)",
-                len(history), self.cfg.max_experiments,
+                len(history),
+                self.cfg.max_experiments,
             )
             return True
 
@@ -442,7 +500,8 @@ class Orchestrator:
             if elapsed_hours >= self.cfg.max_wall_clock_hours:
                 logger.info(
                     "Budget exhausted: %.2f hours elapsed (max=%.1f)",
-                    elapsed_hours, self.cfg.max_wall_clock_hours,
+                    elapsed_hours,
+                    self.cfg.max_wall_clock_hours,
                 )
                 return True
 
@@ -453,8 +512,62 @@ class Orchestrator:
             if estimated_cost >= self.cfg.max_dollars:
                 logger.info(
                     "Budget exhausted: estimated cost $%.4f >= $%.2f limit",
-                    estimated_cost, self.cfg.max_dollars,
+                    estimated_cost,
+                    self.cfg.max_dollars,
                 )
                 return True
 
         return False
+
+    def _generate_analysis(
+        self,
+        history: list[Experiment],
+        baseline_score: float,
+        best_score: float,
+        elapsed_s: float,
+    ) -> str:
+        """Call the agent LLM to produce a plain-English post-run analysis.
+
+        Returns the analysis string, or an empty string if the LLM call fails.
+        """
+        try:
+            kept = [e for e in history if e.kept]
+            reverted = [e for e in history if not e.kept and e.agent_decision is not None]
+
+            # Summarise what mutations were tried
+            tried: list[str] = []
+            for e in history:
+                if e.agent_decision:
+                    changes = e.agent_decision.mutation.get("changes", {})
+                    for k, v in changes.items():
+                        tried.append(f"{k}={v} ({'kept' if e.kept else 'reverted'})")
+
+            tried_str = "; ".join(tried[:20]) or "none"
+            improvement_pct = 100 * (best_score - baseline_score) / max(baseline_score, 1e-9)
+            hw = self.hardware
+
+            prompt = f"""\
+You are analyzing the results of an automated vLLM deployment optimization run.
+
+Hardware: {hw.vendor} {hw.gpu_type} x{hw.count} ({hw.memory_gb_per_gpu} GB VRAM each)
+Model: {self.model}
+Total experiments: {len(history)}
+Kept (improved): {len(kept)}
+Reverted: {len(reverted)}
+Baseline throughput: {baseline_score:.1f} tok/s
+Best throughput: {best_score:.1f} tok/s
+Improvement: {improvement_pct:.1f}%
+Wall time: {elapsed_s / 60:.0f} min
+Mutations tried: {tried_str}
+
+Write a short analysis (4-6 sentences) for the user. Cover:
+1. What the results mean (e.g. baseline=best means the hardware is already near its ceiling for this config, or significant gain means chunked prefill / prefix caching helped)
+2. Why configs did or didn't move the needle (memory bandwidth ceiling, KV-cache pressure, batch size already optimal, etc.)
+3. One or two concrete next steps the user should try (different hardware, real workload instead of synthetic, quantization, speculative decoding, etc.)
+
+Be direct and specific. No bullet points. No markdown headers. Just plain prose."""
+
+            return self.llm(prompt).strip()
+        except Exception as exc:
+            logger.debug("Post-run analysis failed: %s", exc)
+            return ""

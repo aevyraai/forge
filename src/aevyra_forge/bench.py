@@ -77,6 +77,7 @@ def benchmark(
 
     if dry_run:
         import random
+
         rng = random.Random(recipe_id)
         return BenchResult(
             throughput_tokens_per_sec=rng.uniform(800, 1200),
@@ -105,24 +106,83 @@ def benchmark(
     total_output_tokens = 0
     errors: list[str] = []
 
+    # Detect which completion endpoint this vLLM version exposes
+    with httpx.Client(base_url=server_url, timeout=30) as probe:
+        try:
+            _r = probe.get("/v1/models", timeout=5.0)
+            _models = _r.json().get("data", [])
+            _model_id = _models[0]["id"] if _models else "default"
+        except Exception:
+            _model_id = "default"
+        # Prefer /v1/chat/completions (vLLM 0.4+); fall back to /v1/completions
+        _chat_probe = probe.post(
+            "/v1/chat/completions",
+            json={
+                "model": _model_id,
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 1,
+            },
+            timeout=10.0,
+        )
+        _use_chat = _chat_probe.status_code == 200
+
+    # Progress bar — use tqdm.notebook in Jupyter/Colab, plain tqdm elsewhere
+    try:
+        from tqdm.notebook import tqdm as _tqdm
+    except ImportError:
+        try:
+            from tqdm import tqdm as _tqdm
+        except ImportError:
+            _tqdm = None  # tqdm not installed, skip bar
+
+    def _wrap(iterable, **kwargs):
+        if _tqdm is not None:
+            return _tqdm(iterable, **kwargs)
+        return iterable
+
     with httpx.Client(base_url=server_url, timeout=timeout_s) as client:
-        for req in workload.requests:
+        for req in _wrap(
+            workload.requests,
+            total=len(workload.requests),
+            desc="forge │  bench",
+            unit="req",
+            dynamic_ncols=True,
+        ):
             t0 = time.time()
             try:
-                resp = client.post(
-                    "/v1/completions",
-                    json={
-                        "model": "default",
-                        "prompt": req.prompt,
-                        "max_tokens": req.expected_output_tokens,
-                        "stream": False,
-                    },
-                    timeout=60.0,
-                )
+                if _use_chat:
+                    resp = client.post(
+                        "/v1/chat/completions",
+                        json={
+                            "model": _model_id,
+                            "messages": [{"role": "user", "content": req.prompt}],
+                            "max_tokens": req.expected_output_tokens,
+                            "stream": False,
+                        },
+                        timeout=60.0,
+                    )
+                else:
+                    resp = client.post(
+                        "/v1/completions",
+                        json={
+                            "model": _model_id,
+                            "prompt": req.prompt,
+                            "max_tokens": req.expected_output_tokens,
+                            "stream": False,
+                        },
+                        timeout=60.0,
+                    )
                 t1 = time.time()
                 if resp.status_code == 200:
                     data = resp.json()
-                    n_tokens = data.get("usage", {}).get("completion_tokens", req.expected_output_tokens)
+                    if _use_chat:
+                        n_tokens = data.get("usage", {}).get(
+                            "completion_tokens", req.expected_output_tokens
+                        )
+                    else:
+                        n_tokens = data.get("usage", {}).get(
+                            "completion_tokens", req.expected_output_tokens
+                        )
                     total_output_tokens += n_tokens
                     latency_ms = (t1 - t0) * 1000
                     latencies.append(latency_ms)

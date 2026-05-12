@@ -59,9 +59,7 @@ class Workload:
             }
 
         # Estimate input tokens as whitespace-split word count * 1.3
-        input_lens = sorted(
-            int(len(r.prompt.split()) * 1.3) for r in self.requests
-        )
+        input_lens = sorted(int(len(r.prompt.split()) * 1.3) for r in self.requests)
         output_lens = sorted(r.expected_output_tokens for r in self.requests)
 
         def pct(lst: list[int], p: float) -> int:
@@ -109,8 +107,11 @@ def workload_from_jsonl(path: str | Path) -> Workload:
                 prompt=d["prompt"],
                 expected_output_tokens=int(d.get("expected_output_tokens", 128)),
                 arrival_offset_s=float(d.get("arrival_offset_s", 0.0)),
-                metadata={k: v for k, v in d.items()
-                          if k not in ("prompt", "expected_output_tokens", "arrival_offset_s")},
+                metadata={
+                    k: v
+                    for k, v in d.items()
+                    if k not in ("prompt", "expected_output_tokens", "arrival_offset_s")
+                },
             )
         )
     duration_s = requests[-1].arrival_offset_s + 1.0 if requests else 1.0
@@ -141,7 +142,7 @@ def workload_synthetic(
     # Lognormal parameters: mu/sigma s.t. mean ≈ avg
     def _lognormal_sample(avg: int) -> int:
         sigma = 0.5
-        mu = math.log(avg) - 0.5 * sigma ** 2
+        mu = math.log(avg) - 0.5 * sigma**2
         return max(1, int(rng.lognormvariate(mu, sigma)))
 
     # Poisson arrival times
