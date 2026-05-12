@@ -170,6 +170,59 @@ def _kv_gb_per_seq(
     return max(0.001, params_b * 0.05 / 32)
 
 
+def safe_max_model_len(
+    hardware: HardwareSpec,
+    model_name: str,
+    max_num_seqs: int,
+    gpu_memory_utilization: float = 0.90,
+    quant_method: str = "bf16",
+    block_size: int = 16,
+) -> int | None:
+    """Compute a ``--max-model-len`` value that fits in the KV cache budget.
+
+    Returns ``None`` when the model's native context length fits fine (no
+    cap needed).  Returns a capped length (rounded down to nearest 256)
+    when the native length would OOM.
+
+    Formula:
+        kv_bytes_per_token = 2 × n_layers × n_kv_heads × head_dim × dtype_bytes
+        max_safe_len = kv_budget_bytes / (kv_bytes_per_token × max_num_seqs)
+
+    Falls back to a conservative estimate when HF config is unavailable.
+    """
+    weight_gb = estimate_weight_gb(model_name, quant_method)
+    budget_gb = kv_cache_budget_gb(hardware, weight_gb, gpu_memory_utilization)
+    if budget_gb <= 0:
+        return 2048  # model barely fits; cap aggressively
+
+    dtype_bytes = {"fp16": 2, "bf16": 2, "fp8": 1, "fp8_e4m3": 1, "auto": 2}.get(
+        quant_method.lower(), 2
+    )
+
+    kv_cfg = fetch_model_kv_config(model_name)
+    if kv_cfg:
+        native_len = kv_cfg["max_position_embeddings"]
+        n_layers = kv_cfg["num_hidden_layers"]
+        n_kv_heads = kv_cfg["num_key_value_heads"]
+        head_dim = kv_cfg["head_dim"]
+        kv_bytes_per_token = 2 * n_layers * n_kv_heads * head_dim * dtype_bytes
+        # Budget in bytes, minus a 10% headroom buffer
+        budget_bytes = budget_gb * (1024**3) * 0.90
+        max_safe = int(budget_bytes / (kv_bytes_per_token * max(1, max_num_seqs)))
+        if max_safe >= native_len:
+            return None  # no cap needed
+        # Round down to nearest 256 (vLLM prefers aligned lengths)
+        max_safe = max(512, (max_safe // 256) * 256)
+        return max_safe
+    else:
+        # No HF config: use empirical rule — 1 GB KV budget ≈ 4096 tokens for 8B models
+        m = re.search(r"(\d+(?:\.\d+)?)\s*[bB](?:\b|$)", model_name, re.IGNORECASE)
+        params_b = float(m.group(1)) if m else 8.0
+        tokens_per_gb = max(512, int(32768 / params_b))
+        max_safe = int(budget_gb * tokens_per_gb / max(1, max_num_seqs) * 8)
+        return max(512, (max_safe // 256) * 256) if max_safe < 32768 else None
+
+
 def _safe_max_num_seqs(
     hardware: HardwareSpec,
     model_name: str,
@@ -387,6 +440,15 @@ def baseline_config(hardware: HardwareSpec, model_name: str = "") -> VLLMConfig:
     # Cap to 16384 for small/medium tiers to avoid excessive memory
     if tier in ("small", "medium"):
         cfg.max_num_batched_tokens = min(cfg.max_num_batched_tokens, 8192)
+
+    # --- max_model_len: cap when the model's native context window won't fit ---
+    if model_name:
+        cfg.max_model_len = safe_max_model_len(
+            hardware,
+            model_name,
+            max_num_seqs=cfg.max_num_seqs,
+            gpu_memory_utilization=cfg.gpu_memory_utilization,
+        )
 
     # --- Vendor / GPU specific overrides ---
     if vendor == "nvidia":

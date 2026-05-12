@@ -62,6 +62,7 @@ class VLLMConfig:
     max_num_batched_tokens: int = 8192
     block_size: int = 16
     gpu_memory_utilization: float = 0.9
+    max_model_len: int | None = None  # None = use model's default; set to cap KV cache usage
     enable_prefix_caching: bool = False
     enable_chunked_prefill: bool = True
     swap_space: int = 4

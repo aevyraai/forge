@@ -262,6 +262,8 @@ def build_vllm_args(recipe: Recipe) -> list[str]:
     args += ["--max-num-batched-tokens", str(cfg.max_num_batched_tokens)]
     args += ["--block-size", str(cfg.block_size)]
     args += ["--gpu-memory-utilization", str(cfg.gpu_memory_utilization)]
+    if cfg.max_model_len is not None:
+        args += ["--max-model-len", str(cfg.max_model_len)]
 
     # Gate every optional flag on the installed vLLM version.
     # _flag_supported() parses --help output and only matches lines that
