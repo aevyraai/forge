@@ -140,9 +140,16 @@ class VLLMRunner:
                 pass
             if self._process.poll() is not None:
                 self._tee_thread.join(timeout=2)
+                # Tail the log for the most useful part of the error (last 20 lines).
+                tail = ""
+                try:
+                    lines = log_path.read_text(errors="replace").splitlines()
+                    tail = "\n".join(lines[-20:])
+                except Exception:
+                    pass
                 raise RuntimeError(
                     f"vLLM process exited early (code {self._process.returncode}). "
-                    f"See {log_path} for details."
+                    f"See {log_path} for details.\n{tail}"
                 )
             elapsed_intervals += 1
             if elapsed_intervals % 15 == 0:

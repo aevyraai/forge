@@ -443,7 +443,14 @@ class Orchestrator:
             )
         except Exception as exc:
             logger.error("Runner/bench failed for recipe %s: %s", recipe.id, exc)
-            # Mark the runner as dead so the next experiment forces a fresh start
+            # Stop the failed runner so log file handles and tee thread are cleaned up,
+            # then mark it dead so the next experiment forces a fresh start.
+            old_runner = getattr(self, "_runner", None)
+            if old_runner is not None:
+                try:
+                    old_runner.stop()
+                except Exception:
+                    pass
             self._runner = None
             self._runner_args = []
             bench_result = BenchResult(
