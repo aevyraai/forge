@@ -70,6 +70,10 @@ and no other commentary:
 Constraints:
 - ``changes`` must reference fields legal at the chosen layer.
 - Values must be inside the playbook's stated ranges.
+- If a previous experiment has status=CRASH with an OOM error, do NOT increase
+  max_num_seqs, max_num_batched_tokens, or reduce block_size — these grow KV
+  cache memory. Instead try reducing them or adjusting gpu_memory_utilization.
+- Do not retry a (field, value) pair that already appeared in a CRASH or FAIL experiment.
 - If you believe the search has converged, return mutation.changes = {{}}.
 """
 
@@ -107,16 +111,23 @@ def propose_next_experiment(
     history_lines: list[str] = []
     for exp in recent:
         score_str = f"{exp.score:.4f}" if exp.score is not None else "n/a"
-        status = exp.bench_result.status if exp.bench_result else "PENDING"
+        br = exp.bench_result
+        status = br.status if br else "PENDING"
         kept = "KEPT" if exp.kept else "REVERTED"
         changes = ""
         if exp.agent_decision and exp.agent_decision.mutation.get("changes"):
             changes = str(exp.agent_decision.mutation["changes"])
         rationale = exp.agent_decision.rationale[:80] if exp.agent_decision else ""
-        history_lines.append(
+        line = (
             f"  [{exp.id}] gen={exp.recipe.generation} score={score_str} "
             f"status={status} {kept} changes={changes} rationale={rationale!r}"
         )
+        # Surface the failure reason so the agent doesn't repeat OOM / bad-flag crashes
+        if br and br.error and status in ("CRASH", "FAIL"):
+            # Trim to the most informative part (first 200 chars)
+            error_snippet = br.error.replace("\n", " ")[:200]
+            line += f" error={error_snippet!r}"
+        history_lines.append(line)
     history_text = "\n".join(history_lines) if history_lines else "  (no experiments yet)"
     playbook_text = format_for_agent(playbook, current_recipe.hardware, layer="config")
 
