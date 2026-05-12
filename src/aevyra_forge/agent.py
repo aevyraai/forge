@@ -132,15 +132,22 @@ def propose_next_experiment(
         if exp.agent_decision and exp.agent_decision.mutation.get("changes"):
             changes = str(exp.agent_decision.mutation["changes"])
         rationale = exp.agent_decision.rationale[:80] if exp.agent_decision else ""
-        line = (
-            f"  [{exp.id}] gen={exp.recipe.generation} score={score_str} "
-            f"status={status} {kept} changes={changes} rationale={rationale!r}"
-        )
-        # Surface the failure reason so the agent doesn't repeat OOM / bad-flag crashes
-        if br and br.error and status in ("CRASH", "FAIL"):
-            # Trim to the most informative part (first 200 chars)
-            error_snippet = br.error.replace("\n", " ")[:200]
-            line += f" error={error_snippet!r}"
+        # Mark duplicate-skipped experiments clearly so the agent knows
+        # this exact mutation was already tried and blocked
+        if exp.id.startswith("dup-"):
+            line = (
+                f"  [{exp.id}] DUPLICATE SKIPPED — changes={changes} were already "
+                f"tried and failed. Do not propose this again."
+            )
+        else:
+            line = (
+                f"  [{exp.id}] gen={exp.recipe.generation} score={score_str} "
+                f"status={status} {kept} changes={changes} rationale={rationale!r}"
+            )
+            # Surface the failure reason so the agent doesn't repeat OOM / bad-flag crashes
+            if br and br.error and status in ("CRASH", "FAIL"):
+                error_snippet = br.error.replace("\n", " ")[:200]
+                line += f" error={error_snippet!r}"
         history_lines.append(line)
     history_text = "\n".join(history_lines) if history_lines else "  (no experiments yet)"
     playbook_text = format_for_agent(playbook, current_recipe.hardware, layer="config")
