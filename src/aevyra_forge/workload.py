@@ -43,6 +43,7 @@ class Workload:
     requests: list[WorkloadRequest]
     duration_s: float
     metadata: dict[str, Any] = field(default_factory=dict)
+    concurrency: int = 1  # max simultaneous in-flight requests during benchmarking
 
     def summary(self) -> dict[str, Any]:
         """Distributions the agent prompt can read."""
@@ -116,6 +117,39 @@ def workload_from_jsonl(path: str | Path) -> Workload:
         )
     duration_s = requests[-1].arrival_offset_s + 1.0 if requests else 1.0
     return Workload(requests=requests, duration_s=duration_s)
+
+
+def workload_concurrent_synthetic(
+    *,
+    n_requests: int = 200,
+    concurrency: int = 16,
+    avg_input_tokens: int = 256,
+    avg_output_tokens: int = 128,
+    duration_s: float = 60.0,
+    seed: int = 0,
+) -> Workload:
+    """Synthetic workload designed to stress vLLM's batching engine.
+
+    Unlike :func:`workload_synthetic`, all requests are sent concurrently
+    (up to *concurrency* in-flight at once) so that ``max_num_seqs``,
+    ``max_num_batched_tokens``, and ``enable_chunked_prefill`` are actually
+    exercised.  Use this instead of the default sequential workload whenever
+    you want config-layer mutations to have a measurable effect.
+
+    Typical concurrency values:
+    - T4 / A10 (16–24 GB):  concurrency=8–16
+    - A100 / H100 (80 GB):  concurrency=32–64
+    """
+    wl = workload_synthetic(
+        n_requests=n_requests,
+        avg_input_tokens=avg_input_tokens,
+        avg_output_tokens=avg_output_tokens,
+        duration_s=duration_s,
+        seed=seed,
+    )
+    wl.concurrency = concurrency
+    wl.metadata["id"] = f"concurrent-synthetic-c{concurrency}"
+    return wl
 
 
 def workload_from_langfuse(path: str | Path) -> Workload:
