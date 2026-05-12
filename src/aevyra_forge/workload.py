@@ -51,19 +51,21 @@ class Workload:
         Computed as the maximum over all requests of:
             estimated_input_tokens + expected_output_tokens
 
-        Input tokens are estimated using the same 1.3× word-count heuristic
-        as ``summary()``.  Add a 10% safety margin so quantisation and
-        tokeniser differences don't push us over the edge.
+        Uses a 2.0× word-count multiplier (not 1.3×) because synthetic workloads
+        use random tokens like ``sys1234`` that BPE splits into 2-3 subwords each.
+        Real production prompts are closer to 1.3× but over-estimating here is
+        safe — it just means we request a slightly larger context window.
+        Adds a 25% safety margin on top.
         """
         if not self.requests:
             return 512
         worst = max(
-            int(len(r.prompt.split()) * 1.3) + r.expected_output_tokens
+            int(len(r.prompt.split()) * 2.0) + r.expected_output_tokens
             for r in self.requests
         )
-        # Round up to the nearest 256 and add 10% headroom
-        with_margin = int(worst * 1.1)
-        return max(512, ((with_margin + 255) // 256) * 256)
+        # Round up to the nearest 512 with 25% headroom
+        with_margin = int(worst * 1.25)
+        return max(512, ((with_margin + 511) // 512) * 512)
 
     def summary(self) -> dict[str, Any]:
         """Distributions the agent prompt can read."""

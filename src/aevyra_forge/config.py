@@ -212,9 +212,9 @@ def safe_max_model_len(
         max_safe = int(budget_bytes / (kv_bytes_per_token * max(1, max_num_seqs)))
         if max_safe >= native_len:
             return None  # no cap needed
-        # Never go below what the workload actually needs
-        max_safe = max(min_context_len, (max_safe // 256) * 256)
-        return max_safe
+        # Round down to nearest 512, but never below the workload floor
+        capped = max(min_context_len, (max_safe // 512) * 512)
+        return capped
     else:
         # No HF config: use empirical rule — 1 GB KV budget ≈ 4096 tokens for 8B models
         m = re.search(r"(\d+(?:\.\d+)?)\s*[bB](?:\b|$)", model_name, re.IGNORECASE)
@@ -223,7 +223,7 @@ def safe_max_model_len(
         max_safe = int(budget_gb * tokens_per_gb / max(1, max_num_seqs) * 8)
         if max_safe >= 32768:
             return None
-        return max(min_context_len, (max_safe // 256) * 256)
+        return max(min_context_len, (max_safe // 512) * 512)
 
 
 def _safe_max_num_seqs(
