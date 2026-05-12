@@ -70,10 +70,17 @@ and no other commentary:
 Constraints:
 - ``changes`` must reference fields legal at the chosen layer.
 - Values must be inside the playbook's stated ranges.
-- If a previous experiment has status=CRASH with an OOM error, do NOT increase
-  max_num_seqs, max_num_batched_tokens, or reduce block_size — these grow KV
-  cache memory. Instead try reducing them or adjusting gpu_memory_utilization.
 - Do not retry a (field, value) pair that already appeared in a CRASH or FAIL experiment.
+- Memory relationships (CRITICAL — read before touching memory knobs):
+    * KV cache budget = gpu_memory_utilization × total_vram − model_weights
+    * max_num_seqs and max_num_batched_tokens CONSUME KV cache — raising them
+      requires MORE budget, not less.
+    * Lowering gpu_memory_utilization SHRINKS the KV cache budget — it does NOT
+      free space for more sequences; it makes OOM more likely.
+    * If an experiment crashed with an OOM (error contains "KV cache" or
+      "larger than the available"), the fix is to REDUCE max_num_seqs or
+      INCREASE gpu_memory_utilization, never both at once.
+    * Never pair max_num_seqs > baseline with gpu_memory_utilization < baseline.
 - If you believe the search has converged, return mutation.changes = {{}}.
 """
 
