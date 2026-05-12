@@ -83,10 +83,20 @@ class VLLMRunner:
             self._process = None
             return
 
+        import os
+        # Default vLLM logs to WARNING to keep output clean.
+        # Users can override by setting VLLM_LOGGING_LEVEL=INFO before running.
+        if "VLLM_LOGGING_LEVEL" not in os.environ:
+            os.environ["VLLM_LOGGING_LEVEL"] = "WARNING"
+            logger.info(
+                "forge │  vLLM logs suppressed (WARNING level). "
+                "Set VLLM_LOGGING_LEVEL=INFO to enable."
+            )
+
         args = ["vllm", "serve"] + build_vllm_args(self.recipe)
         log_path = self.work_dir / f"vllm_{self.recipe.id}.log"
         self.work_dir.mkdir(parents=True, exist_ok=True)
-        logger.info("Starting vLLM: %s", " ".join(args))
+        logger.info("forge │  starting vLLM  log → %s", log_path)
         self._log_file = log_path.open("w")
 
         # Tee vLLM output to the log file AND to stderr so it's visible in

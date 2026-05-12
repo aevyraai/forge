@@ -122,8 +122,28 @@ def benchmark(
         )
         _use_chat = _chat_probe.status_code == 200
 
+    # Progress bar — use tqdm.notebook in Jupyter/Colab, plain tqdm elsewhere
+    try:
+        from tqdm.notebook import tqdm as _tqdm
+    except ImportError:
+        try:
+            from tqdm import tqdm as _tqdm
+        except ImportError:
+            _tqdm = None  # tqdm not installed, skip bar
+
+    def _wrap(iterable, **kwargs):
+        if _tqdm is not None:
+            return _tqdm(iterable, **kwargs)
+        return iterable
+
     with httpx.Client(base_url=server_url, timeout=timeout_s) as client:
-        for req in workload.requests:
+        for req in _wrap(
+            workload.requests,
+            total=len(workload.requests),
+            desc="forge │  bench",
+            unit="req",
+            dynamic_ncols=True,
+        ):
             t0 = time.time()
             try:
                 if _use_chat:

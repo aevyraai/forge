@@ -129,7 +129,7 @@ class Orchestrator:
         )
 
         # Run baseline experiment
-        logger.info("Running baseline experiment...")
+        logger.info("forge ┌─ experiment 0/%d  [baseline]", self.cfg.max_experiments)
         baseline_exp = self._run_one(baseline_recipe, agent_decision=None)
         baseline_exp.kept = True
         self.store.append(baseline_exp)
@@ -139,9 +139,10 @@ class Orchestrator:
         best_score = baseline_exp.score or 0.0
 
         logger.info(
-            "Baseline score=%.4f (throughput=%.1f tok/s)",
+            "forge └─ baseline  score=%.1f tok/s  p99=%.0fms  status=%s",
             best_score,
-            baseline_exp.bench_result.throughput_tokens_per_sec if baseline_exp.bench_result else 0.0,
+            baseline_exp.bench_result.p99_latency_ms if baseline_exp.bench_result else 0.0,
+            baseline_exp.bench_result.status if baseline_exp.bench_result else "?",
         )
 
         while not self._is_converged(history) and not self._budget_exhausted(history):
@@ -150,6 +151,11 @@ class Orchestrator:
                 current_layer = self._should_escalate(history, current_layer)
 
             # Ask agent for next mutation
+            exp_n = len(history)
+            logger.info(
+                "forge │  experiment %d/%d — asking agent...",
+                exp_n, self.cfg.max_experiments,
+            )
             try:
                 from aevyra_forge import agent as agent_mod
                 decision = agent_mod.propose_next_experiment(
@@ -160,13 +166,20 @@ class Orchestrator:
                     llm=self.llm,
                 )
             except Exception as exc:
-                logger.warning("Agent call failed: %s — skipping experiment", exc)
+                logger.warning("forge │  agent call failed: %s — skipping", exc)
                 continue
 
             # Empty changes = agent says converged
             if not decision.mutation.get("changes"):
-                logger.info("Agent returned empty mutation — search converged.")
+                logger.info("forge │  agent returned empty mutation — converged.")
                 break
+
+            logger.info(
+                "forge ┌─ experiment %d/%d",
+                exp_n, self.cfg.max_experiments,
+            )
+            logger.info("forge │  rationale : %s", decision.rationale)
+            logger.info("forge │  mutation  : %s", decision.mutation.get("changes", {}))
 
             # Apply mutation
             try:
@@ -191,22 +204,22 @@ class Orchestrator:
 
             # Keep or revert
             improvement_threshold = best_score * (1 + self.cfg.min_improvement_pct / 100)
+            p99 = exp.bench_result.p99_latency_ms if exp.bench_result else 0.0
+            dur = exp.duration_s
             if exp.score is not None and exp.score > improvement_threshold:
                 exp.kept = True
+                gain = 100 * (exp.score - best_score) / max(best_score, 1e-9)
                 current_recipe = candidate
                 best_score = exp.score
                 logger.info(
-                    "[%s] KEPT  score=%.4f (+%.1f%%) layer=%s rationale=%r",
-                    exp.id, exp.score,
-                    100 * (exp.score - best_score) / max(best_score, 1e-9),
-                    current_layer,
-                    decision.rationale[:60],
+                    "forge └─ ✓ KEPT      score=%.1f tok/s  p99=%.0fms  +%.1f%%  duration=%.0fs",
+                    exp.score, p99, gain, dur,
                 )
             else:
                 exp.kept = False
                 logger.info(
-                    "[%s] REVERTED score=%.4f (best=%.4f) layer=%s",
-                    exp.id, exp.score or 0.0, best_score, current_layer,
+                    "forge └─ ✗ REVERTED  score=%.1f tok/s  p99=%.0fms  best=%.1f  duration=%.0fs",
+                    exp.score or 0.0, p99, best_score, dur,
                 )
 
             self.store.append(exp)
@@ -214,10 +227,19 @@ class Orchestrator:
 
         best_exp = self.store.best()
         best_recipe = best_exp.recipe if best_exp else baseline_recipe
-        logger.info(
-            "Forge finished. Best score=%.4f after %d experiments.",
-            best_score, len(history),
-        )
+        baseline_score = history[0].score or 0.0
+        total_gain = 100 * (best_score - baseline_score) / max(baseline_score, 1e-9)
+        elapsed = time.time() - self._run_start
+        kept_count = sum(1 for e in history if e.kept)
+        logger.info("forge ══════════════════════════════════════════")
+        logger.info("forge   total experiments : %d", len(history))
+        logger.info("forge   kept              : %d", kept_count)
+        logger.info("forge   baseline score    : %.1f tok/s", baseline_score)
+        logger.info("forge   best score        : %.1f tok/s  (+%.1f%%)", best_score, total_gain)
+        logger.info("forge   wall time         : %.0f min", elapsed / 60)
+        logger.info("forge   best recipe gen   : %d  id=%s",
+                    best_recipe.generation, best_recipe.id)
+        logger.info("forge ══════════════════════════════════════════")
         return best_recipe, history
 
     def resume(self) -> tuple[Recipe, list[Experiment]]:
