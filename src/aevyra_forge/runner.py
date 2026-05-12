@@ -203,6 +203,33 @@ class VLLMRunner:
         self.stop()
 
 
+_VLLM_HELP_CACHE: str | None = None
+
+
+def _vllm_help() -> str:
+    """Return ``vllm serve --help`` output, cached after first call.
+
+    Used to probe which flags the installed vLLM version supports so we
+    don't pass removed flags (e.g. ``--swap-space``, ``--disable-chunked-prefill``).
+    Returns an empty string if vLLM is not installed.
+    """
+    global _VLLM_HELP_CACHE
+    if _VLLM_HELP_CACHE is None:
+        import subprocess
+
+        try:
+            result = subprocess.run(
+                ["vllm", "serve", "--help"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            _VLLM_HELP_CACHE = result.stdout + result.stderr
+        except Exception:
+            _VLLM_HELP_CACHE = ""
+    return _VLLM_HELP_CACHE
+
+
 def build_vllm_args(recipe: Recipe) -> list[str]:
     """Translate a Recipe into ``vllm serve`` argv."""
     cfg = recipe.config
@@ -212,27 +239,24 @@ def build_vllm_args(recipe: Recipe) -> list[str]:
     args += ["--max-num-batched-tokens", str(cfg.max_num_batched_tokens)]
     args += ["--block-size", str(cfg.block_size)]
     args += ["--gpu-memory-utilization", str(cfg.gpu_memory_utilization)]
-    if cfg.swap_space > 0:
-        # --swap-space was removed in vLLM 0.6+; skip silently if zero
-        try:
-            import subprocess
 
-            result = subprocess.run(["vllm", "serve", "--help"], capture_output=True, text=True)
-            if "--swap-space" in result.stdout or "--swap-space" in result.stderr:
-                args += ["--swap-space", str(cfg.swap_space)]
-        except Exception:
-            pass
+    # Probe vllm serve --help once to detect removed flags (cached on module).
+    _help = _vllm_help()
+    if cfg.swap_space > 0 and "--swap-space" in _help:
+        args += ["--swap-space", str(cfg.swap_space)]
     args += ["--kv-cache-dtype", cfg.kv_cache_dtype]
     args += ["--tensor-parallel-size", str(cfg.tensor_parallel_size)]
-    args += ["--pipeline-parallel-size", str(cfg.pipeline_parallel_size)]
 
-    if cfg.enable_prefix_caching:
+    if "--pipeline-parallel-size" in _help:
+        args += ["--pipeline-parallel-size", str(cfg.pipeline_parallel_size)]
+
+    if cfg.enable_prefix_caching and "--enable-prefix-caching" in _help:
         args.append("--enable-prefix-caching")
-    if not cfg.enable_chunked_prefill:
+    if not cfg.enable_chunked_prefill and "--disable-chunked-prefill" in _help:
         args.append("--disable-chunked-prefill")
-    if cfg.attention_backend:
+    if cfg.attention_backend and "--attention-backend" in _help:
         args += ["--attention-backend", cfg.attention_backend]
-    if cfg.speculative_model:
+    if cfg.speculative_model and "--speculative-model" in _help:
         args += [
             "--speculative-model",
             cfg.speculative_model,
