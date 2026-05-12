@@ -79,33 +79,118 @@ def kv_cache_budget_gb(
     return max(0.0, budget)
 
 
+def fetch_model_kv_config(model_name: str) -> dict[str, int] | None:
+    """Fetch exact KV architecture from HuggingFace config.json.
+
+    Returns a dict with keys: ``num_hidden_layers``, ``num_key_value_heads``,
+    ``head_dim``, ``max_position_embeddings``.  Returns ``None`` on any
+    failure (no network, private repo, non-standard config).
+
+    Results are cached in-process so the HTTP call happens at most once.
+    """
+    cache_key = model_name
+    if cache_key in _MODEL_KV_CONFIG_CACHE:
+        return _MODEL_KV_CONFIG_CACHE[cache_key]
+
+    result = None
+    try:
+        import json
+        import urllib.request
+
+        # Normalise HF repo names: strip leading slash, map local paths to None
+        repo = model_name.strip("/")
+        if repo.startswith(".") or repo.startswith("/"):
+            return None  # local path — can't fetch from HF
+
+        url = f"https://huggingface.co/{repo}/resolve/main/config.json"
+        with urllib.request.urlopen(url, timeout=5) as resp:  # noqa: S310
+            cfg = json.loads(resp.read().decode())
+
+        # Support standard (dense), GQA, and MLA layouts
+        n_layers = cfg.get("num_hidden_layers") or cfg.get("n_layer")
+        # GQA: num_key_value_heads < num_attention_heads
+        n_kv_heads = cfg.get("num_key_value_heads") or cfg.get("num_attention_heads") or cfg.get("n_head")
+        hidden = cfg.get("hidden_size") or cfg.get("d_model")
+        n_heads = cfg.get("num_attention_heads") or cfg.get("n_head")
+        head_dim = cfg.get("head_dim")
+        if head_dim is None and hidden and n_heads:
+            head_dim = hidden // n_heads
+        max_pos = cfg.get("max_position_embeddings") or cfg.get("max_seq_len") or 4096
+
+        if n_layers and n_kv_heads and head_dim:
+            result = {
+                "num_hidden_layers": int(n_layers),
+                "num_key_value_heads": int(n_kv_heads),
+                "head_dim": int(head_dim),
+                "max_position_embeddings": int(max_pos),
+            }
+    except Exception:
+        pass
+
+    _MODEL_KV_CONFIG_CACHE[cache_key] = result
+    return result
+
+
+_MODEL_KV_CONFIG_CACHE: dict[str, dict[str, int] | None] = {}
+
+
+def _kv_gb_per_seq(
+    model_name: str,
+    block_size: int = 16,
+    quant_method: str = "bf16",
+) -> float:
+    """KV cache memory in GB for one fully-populated sequence.
+
+    Uses exact HuggingFace config when available, falls back to a
+    params_b-based estimate for offline / private / unknown models.
+
+    Formula (exact path):
+        bytes = 2 × n_layers × n_kv_heads × head_dim × max_pos × dtype_bytes
+        The factor 2 is for K and V tensors.
+
+    With block-based allocation vLLM rounds up to the next block boundary,
+    so we use max_position_embeddings as the worst-case sequence length.
+    """
+    dtype_bytes = {"fp16": 2, "bf16": 2, "fp8": 1, "fp8_e4m3": 1, "auto": 2}.get(
+        quant_method.lower(), 2
+    )
+
+    kv_cfg = fetch_model_kv_config(model_name)
+    if kv_cfg:
+        n_layers = kv_cfg["num_hidden_layers"]
+        n_kv_heads = kv_cfg["num_key_value_heads"]
+        head_dim = kv_cfg["head_dim"]
+        max_pos = kv_cfg["max_position_embeddings"]
+        bytes_total = 2 * n_layers * n_kv_heads * head_dim * max_pos * dtype_bytes
+        return bytes_total / (1024**3)
+
+    # Fallback: empirical rule — kv_gb_per_seq ≈ params_b × 0.05 / 32
+    m = re.search(r"(\d+(?:\.\d+)?)\s*[bB](?:\b|$)", model_name, re.IGNORECASE)
+    params_b = float(m.group(1)) if m else 8.0
+    return max(0.001, params_b * 0.05 / 32)
+
+
 def _safe_max_num_seqs(
     hardware: HardwareSpec,
     model_name: str,
     quant_method: str = "bf16",
+    block_size: int = 16,
 ) -> int:
     """Upper bound on ``max_num_seqs`` that avoids KV-cache OOM.
 
-    Uses a conservative heuristic: compute KV budget at 0.92 utilization,
-    then estimate sequences from params_b.
-
-    KV memory per sequence scales with model depth/width. Empirical rule:
-      kv_gb_per_32_seqs ≈ params_b × 0.05
-    (Derived from: 8B → ~32 seqs costs ~0.4 GB; 70B → ~32 seqs costs ~3.5 GB)
+    Uses exact HuggingFace architecture config when fetchable, otherwise
+    falls back to a params_b heuristic.
 
     Returns the largest value in ``[8, 16, 32, 64, 128, 256, 512, 1024]``
-    that fits, minimum 8.
+    that fits within the KV budget at gpu_memory_utilization=0.92, minimum 8.
     """
     weight_gb = estimate_weight_gb(model_name, quant_method)
-    # Use 0.92 as the ceiling to compute the theoretical max
     budget = kv_cache_budget_gb(hardware, weight_gb, gpu_memory_utilization=0.92)
     if budget <= 0:
         return 8
 
-    m = re.search(r"(\d+(?:\.\d+)?)\s*[bB](?:\b|$)", model_name, re.IGNORECASE)
-    params_b = float(m.group(1)) if m else 8.0
-    kv_gb_per_32 = max(0.05, params_b * 0.05)
-    max_safe = max(8, int(budget / kv_gb_per_32 * 32))
+    kv_per_seq = _kv_gb_per_seq(model_name, block_size=block_size, quant_method=quant_method)
+    max_safe = max(8, int(budget / kv_per_seq))
 
     candidates = [8, 16, 32, 64, 128, 256, 512, 1024]
     for v in reversed(candidates):

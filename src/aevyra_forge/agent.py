@@ -154,12 +154,24 @@ def propose_next_experiment(
     safe_seqs = config_mod._safe_max_num_seqs(hw, current_recipe.model, quant_method)
     space = config_mod.search_space(hw, current_recipe.model, quant_method)
 
+    kv_cfg = config_mod.fetch_model_kv_config(current_recipe.model)
+    if kv_cfg:
+        kv_source = (
+            f"exact (n_layers={kv_cfg['num_hidden_layers']}, "
+            f"n_kv_heads={kv_cfg['num_key_value_heads']}, "
+            f"head_dim={kv_cfg['head_dim']}, "
+            f"max_pos={kv_cfg['max_position_embeddings']})"
+        )
+    else:
+        kv_source = "estimated from params_b (HuggingFace config unavailable)"
+
     memory_budget = (
-        f"GPU VRAM      : {hw.memory_gb_per_gpu} GB × {hw.count} = {hw.memory_gb_per_gpu * hw.count} GB total\n"
-        f"Model weights : ~{weight_gb:.1f} GB ({quant_method})\n"
+        f"GPU VRAM        : {hw.memory_gb_per_gpu} GB × {hw.count} = {hw.memory_gb_per_gpu * hw.count} GB total\n"
+        f"Model weights   : ~{weight_gb:.1f} GB ({quant_method})\n"
+        f"KV calc source  : {kv_source}\n"
         f"KV cache budget at gpu_memory_utilization=0.90 : {budget_90:.1f} GB\n"
         f"KV cache budget at gpu_memory_utilization=0.92 : {budget_92:.1f} GB\n"
-        f"Estimated safe max_num_seqs ceiling             : {safe_seqs}\n"
+        f"Safe max_num_seqs ceiling : {safe_seqs}\n"
         f"RULE: Do NOT propose max_num_seqs > {safe_seqs} — it will OOM on this hardware+model."
     )
 
