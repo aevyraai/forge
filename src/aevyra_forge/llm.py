@@ -6,16 +6,37 @@
 #
 #     http://www.apache.org/licenses/LICENSE-2.0
 
-"""LLM client — same contract as ``aevyra_origin.llm``.
+"""LLM backends for Forge's decision agent.
 
-See AGENT.md → "Module-by-module spec → llm.py".
+The contract is intentionally minimal: ``Callable[[str], str]``.  Any
+callable that accepts a prompt string and returns a completion string is
+a valid agent backend.
 
-The contract is intentionally minimal: ``Callable[[str], str]``. Any
-function that fits is a valid agent backend.
+Convenience factories
+---------------------
 
-Eventually this module + Origin's ``llm.py`` should be extracted into
-a shared ``aevyra-common`` package. For v0, copy the implementation
-verbatim from Origin (don't reinvent).
+- :func:`anthropic_llm` — Claude via the Anthropic SDK
+- :func:`openai_llm`    — any OpenAI-compatible endpoint
+- :func:`resolve_llm`   — dispatch from a ``"provider/model"`` string
+
+Supported providers via :func:`resolve_llm`::
+
+    anthropic   anthropic/claude-sonnet-4-6          ANTHROPIC_API_KEY
+    openai      openai/gpt-4o                         OPENAI_API_KEY
+    openrouter  openrouter/qwen/qwen3-8b              OPENROUTER_API_KEY
+    groq        groq/llama-3.3-70b-versatile          GROQ_API_KEY
+    together    together/meta-llama/Llama-3.3-70B-... TOGETHER_API_KEY
+    fireworks   fireworks/accounts/fireworks/models/… FIREWORKS_API_KEY
+    deepinfra   deepinfra/meta-llama/Llama-3-8B       DEEPINFRA_API_KEY
+    mistral     mistral/mistral-small-latest          MISTRAL_API_KEY
+    ollama      ollama/qwen3:8b                       (local, no key)
+    lmstudio    lmstudio/local-model                  (local, no key)
+
+All factories expose a ``tokens_used: int`` attribute that accumulates
+across calls, used by the orchestrator's dollar-budget gate.
+
+Eventually this module and ``aevyra_origin.llm`` should be extracted
+into a shared ``aevyra-common`` package.
 """
 
 from __future__ import annotations
@@ -121,11 +142,33 @@ def openai_llm(
 def resolve_llm(model_str: str) -> LLMFn:
     """Resolve a ``provider/model`` string into an LLMFn.
 
+    Supported providers
+    -------------------
+
+    +--------------+----------------------------------+---------------------------+
+    | Provider     | Example string                   | Env var                   |
+    +==============+==================================+===========================+
+    | anthropic    | anthropic/claude-sonnet-4-6      | ANTHROPIC_API_KEY         |
+    | openai       | openai/gpt-4o                    | OPENAI_API_KEY            |
+    | openrouter   | openrouter/qwen/qwen3-8b         | OPENROUTER_API_KEY        |
+    | groq         | groq/llama-3.3-70b-versatile     | GROQ_API_KEY              |
+    | together     | together/meta-llama/Llama-3-8B   | TOGETHER_API_KEY          |
+    | fireworks    | fireworks/accounts/fireworks/... | FIREWORKS_API_KEY         |
+    | deepinfra    | deepinfra/meta-llama/Llama-3-8B  | DEEPINFRA_API_KEY         |
+    | mistral      | mistral/mistral-small-latest     | MISTRAL_API_KEY           |
+    | ollama       | ollama/qwen3:8b                  | (none, local)             |
+    | lmstudio     | lmstudio/local-model             | (none, local)             |
+    +--------------+----------------------------------+---------------------------+
+
+    Any other prefix is forwarded to ``openai_llm`` as-is (useful for
+    custom OpenAI-compatible deployments).
+
     Examples::
 
-        resolve_llm("anthropic/claude-sonnet-4-5")
+        resolve_llm("anthropic/claude-sonnet-4-6")
         resolve_llm("openrouter/qwen/qwen3-8b")
-        resolve_llm("openai/gpt-4o")
+        resolve_llm("groq/llama-3.3-70b-versatile")
+        resolve_llm("together/meta-llama/Llama-3.3-70B-Instruct-Turbo")
         resolve_llm("ollama/qwen3:8b")
     """
     parts = model_str.split("/", 1)
@@ -135,17 +178,68 @@ def resolve_llm(model_str: str) -> LLMFn:
 
     if provider == "anthropic":
         return anthropic_llm(model=model)
+
     if provider == "openai":
         return openai_llm(model=model)
+
     if provider == "openrouter":
         return openai_llm(
             model=model,
             base_url="https://openrouter.ai/api/v1",
             api_key=os.environ.get("OPENROUTER_API_KEY"),
         )
+
+    if provider == "groq":
+        return openai_llm(
+            model=model,
+            base_url="https://api.groq.com/openai/v1",
+            api_key=os.environ.get("GROQ_API_KEY"),
+        )
+
+    if provider == "together":
+        return openai_llm(
+            model=model,
+            base_url="https://api.together.xyz/v1",
+            api_key=os.environ.get("TOGETHER_API_KEY"),
+        )
+
+    if provider == "fireworks":
+        return openai_llm(
+            model=model,
+            base_url="https://api.fireworks.ai/inference/v1",
+            api_key=os.environ.get("FIREWORKS_API_KEY"),
+        )
+
+    if provider == "deepinfra":
+        return openai_llm(
+            model=model,
+            base_url="https://api.deepinfra.com/v1/openai",
+            api_key=os.environ.get("DEEPINFRA_API_KEY"),
+        )
+
+    if provider == "mistral":
+        return openai_llm(
+            model=model,
+            base_url="https://api.mistral.ai/v1",
+            api_key=os.environ.get("MISTRAL_API_KEY"),
+        )
+
     if provider == "ollama":
-        return openai_llm(model=model, base_url="http://localhost:11434/v1", api_key="ollama")
-    return openai_llm(model=model)
+        return openai_llm(
+            model=model,
+            base_url="http://localhost:11434/v1",
+            api_key="ollama",  # ollama ignores the key but openai SDK requires one
+        )
+
+    if provider == "lmstudio":
+        return openai_llm(
+            model=model,
+            base_url="http://localhost:1234/v1",
+            api_key="lm-studio",
+        )
+
+    # Unknown provider — try as a plain OpenAI-compatible model string
+    return openai_llm(model=model_str)
 
 
 __all__ = ["LLMFn", "anthropic_llm", "openai_llm", "resolve_llm"]

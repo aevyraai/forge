@@ -66,7 +66,9 @@ def main() -> None:
         playbook: Optional[Path] = typer.Option(None, "--playbook",
             help="Path to playbook markdown. Defaults to built-in playbook."),
         llm_provider: str = typer.Option("anthropic/claude-sonnet-4-6", "--llm",
-            help="LLM for the agent. Format: provider/model"),
+            help="LLM for the agent. Format: provider/model. "
+                 "Providers: anthropic, openai, openrouter, groq, together, "
+                 "fireworks, deepinfra, mistral, ollama, lmstudio."),
         max_experiments: int = typer.Option(50, help="Max number of experiments"),
         max_hours: float = typer.Option(12.0, help="Max wall-clock hours"),
         max_dollars: Optional[float] = typer.Option(None, help="Max LLM spend in USD"),
