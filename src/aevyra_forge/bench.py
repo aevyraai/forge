@@ -77,6 +77,7 @@ def benchmark(
 
     if dry_run:
         import random
+
         rng = random.Random(recipe_id)
         return BenchResult(
             throughput_tokens_per_sec=rng.uniform(800, 1200),
@@ -116,8 +117,11 @@ def benchmark(
         # Prefer /v1/chat/completions (vLLM 0.4+); fall back to /v1/completions
         _chat_probe = probe.post(
             "/v1/chat/completions",
-            json={"model": _model_id, "messages": [{"role": "user", "content": "hi"}],
-                  "max_tokens": 1},
+            json={
+                "model": _model_id,
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 1,
+            },
             timeout=10.0,
         )
         _use_chat = _chat_probe.status_code == 200
@@ -172,9 +176,13 @@ def benchmark(
                 if resp.status_code == 200:
                     data = resp.json()
                     if _use_chat:
-                        n_tokens = data.get("usage", {}).get("completion_tokens", req.expected_output_tokens)
+                        n_tokens = data.get("usage", {}).get(
+                            "completion_tokens", req.expected_output_tokens
+                        )
                     else:
-                        n_tokens = data.get("usage", {}).get("completion_tokens", req.expected_output_tokens)
+                        n_tokens = data.get("usage", {}).get(
+                            "completion_tokens", req.expected_output_tokens
+                        )
                     total_output_tokens += n_tokens
                     latency_ms = (t1 - t0) * 1000
                     latencies.append(latency_ms)

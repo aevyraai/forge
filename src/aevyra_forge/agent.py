@@ -112,7 +112,7 @@ def propose_next_experiment(
         changes = ""
         if exp.agent_decision and exp.agent_decision.mutation.get("changes"):
             changes = str(exp.agent_decision.mutation["changes"])
-        rationale = (exp.agent_decision.rationale[:80] if exp.agent_decision else "")
+        rationale = exp.agent_decision.rationale[:80] if exp.agent_decision else ""
         history_lines.append(
             f"  [{exp.id}] gen={exp.recipe.generation} score={score_str} "
             f"status={status} {kept} changes={changes} rationale={rationale!r}"
@@ -151,9 +151,7 @@ def propose_next_experiment(
                 return json.loads(match.group(0))
             except json.JSONDecodeError:
                 pass
-        raise AgentError(
-            f"Could not parse JSON from agent response. Response was:\n{text[:500]}"
-        )
+        raise AgentError(f"Could not parse JSON from agent response. Response was:\n{text[:500]}")
 
     parsed = _parse(raw)
     for key in ("rationale", "mutation"):

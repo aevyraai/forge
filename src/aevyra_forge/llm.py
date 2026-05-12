@@ -127,8 +127,7 @@ def openai_llm(
         from openai import OpenAI
     except ImportError as e:
         raise ImportError(
-            "openai_llm requires the openai package. "
-            "Install with: pip install aevyra-forge[openai]"
+            "openai_llm requires the openai package. Install with: pip install aevyra-forge[openai]"
         ) from e
     kwargs: dict = {}
     if api_key is not None:

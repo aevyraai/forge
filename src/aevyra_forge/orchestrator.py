@@ -115,7 +115,6 @@ class Orchestrator:
         import time
 
         from aevyra_forge import config as config_mod
-        from aevyra_forge.bench import score as bench_score
         from aevyra_forge.recipe import Recipe
 
         self._run_start = time.time()
@@ -155,11 +154,13 @@ class Orchestrator:
             exp_n = len(history)
             logger.info(
                 "forge │  experiment %d/%d — asking agent...",
-                exp_n, self.cfg.max_experiments,
+                exp_n,
+                self.cfg.max_experiments,
             )
             _tokens_before = getattr(self.llm, "tokens_used", 0)
             try:
                 from aevyra_forge import agent as agent_mod
+
                 decision = agent_mod.propose_next_experiment(
                     history=history,
                     playbook=self.playbook,
@@ -180,7 +181,8 @@ class Orchestrator:
 
             logger.info(
                 "forge ┌─ experiment %d/%d",
-                exp_n, self.cfg.max_experiments,
+                exp_n,
+                self.cfg.max_experiments,
             )
             logger.info("forge │  rationale : %s", decision.rationale)
             logger.info("forge │  mutation  : %s", decision.mutation.get("changes", {}))
@@ -188,6 +190,7 @@ class Orchestrator:
             # Apply mutation
             try:
                 from aevyra_forge import config as config_mod
+
                 candidate = config_mod.mutate(current_recipe, decision.mutation)
             except (ValueError, NotImplementedError) as exc:
                 logger.warning("Mutation rejected: %s", exc)
@@ -218,13 +221,21 @@ class Orchestrator:
                 best_score = exp.score
                 logger.info(
                     "forge └─ ✓ KEPT      score=%.1f tok/s  p99=%.0fms  +%.1f%%  duration=%.0fs  llm=%d tok",
-                    exp.score, p99, gain, dur, exp.llm_tokens,
+                    exp.score,
+                    p99,
+                    gain,
+                    dur,
+                    exp.llm_tokens,
                 )
             else:
                 exp.kept = False
                 logger.info(
                     "forge └─ ✗ REVERTED  score=%.1f tok/s  p99=%.0fms  best=%.1f  duration=%.0fs  llm=%d tok",
-                    exp.score or 0.0, p99, best_score, dur, exp.llm_tokens,
+                    exp.score or 0.0,
+                    p99,
+                    best_score,
+                    dur,
+                    exp.llm_tokens,
                 )
 
             self.store.append(exp)
@@ -244,8 +255,7 @@ class Orchestrator:
         logger.info("forge   best score        : %.1f tok/s  (+%.1f%%)", best_score, total_gain)
         logger.info("forge   wall time         : %.0f min", elapsed / 60)
         logger.info("forge   llm tokens used   : %d", total_llm_tokens)
-        logger.info("forge   best recipe gen   : %d  id=%s",
-                    best_recipe.generation, best_recipe.id)
+        logger.info("forge   best recipe gen   : %d  id=%s", best_recipe.generation, best_recipe.id)
         logger.info("forge ══════════════════════════════════════════")
 
         analysis = self._generate_analysis(history, baseline_score, best_score, elapsed)
@@ -279,7 +289,9 @@ class Orchestrator:
 
         logger.info(
             "Resuming from experiment %s with best_score=%.4f (%d experiments in history)",
-            best_exp.id, best_score, len(history),
+            best_exp.id,
+            best_score,
+            len(history),
         )
 
         while not self._is_converged(history) and not self._budget_exhausted(history):
@@ -288,6 +300,7 @@ class Orchestrator:
 
             try:
                 from aevyra_forge import agent as agent_mod
+
                 decision = agent_mod.propose_next_experiment(
                     history=history,
                     playbook=self.playbook,
@@ -305,6 +318,7 @@ class Orchestrator:
 
             try:
                 from aevyra_forge import config as config_mod
+
                 candidate = config_mod.mutate(current_recipe, decision.mutation)
             except (ValueError, NotImplementedError) as exc:
                 logger.warning("Mutation rejected: %s", exc)
@@ -414,15 +428,18 @@ class Orchestrator:
 
         # Count recent experiments at current layer
         recent = [
-            e for e in history
+            e
+            for e in history
             if e.agent_decision and e.agent_decision.mutation.get("layer") == current_layer
-        ][-self.cfg.convergence_window:]
+        ][-self.cfg.convergence_window :]
 
         if len(recent) >= self.cfg.convergence_window and not any(e.kept for e in recent):
             next_layer = _layer_order[idx + 1]
             logger.info(
                 "Layer %s saturated (%d consecutive non-improvements) — escalating to %s",
-                current_layer, self.cfg.convergence_window, next_layer,
+                current_layer,
+                self.cfg.convergence_window,
+                next_layer,
             )
             return next_layer
 
@@ -435,7 +452,7 @@ class Orchestrator:
         if len(history) < self.cfg.convergence_window:
             return False
 
-        recent = history[-self.cfg.convergence_window:]
+        recent = history[-self.cfg.convergence_window :]
         # If any experiment in the window was kept, we haven't converged
         if any(e.kept for e in recent):
             return False
@@ -457,7 +474,9 @@ class Orchestrator:
         if improvement < self.cfg.min_improvement_pct:
             logger.info(
                 "Convergence detected: best improvement in last %d experiments = %.2f%% < %.1f%%",
-                self.cfg.convergence_window, improvement, self.cfg.min_improvement_pct,
+                self.cfg.convergence_window,
+                improvement,
+                self.cfg.min_improvement_pct,
             )
             return True
 
@@ -470,7 +489,8 @@ class Orchestrator:
         if len(history) >= self.cfg.max_experiments:
             logger.info(
                 "Budget exhausted: %d experiments reached (max=%d)",
-                len(history), self.cfg.max_experiments,
+                len(history),
+                self.cfg.max_experiments,
             )
             return True
 
@@ -480,7 +500,8 @@ class Orchestrator:
             if elapsed_hours >= self.cfg.max_wall_clock_hours:
                 logger.info(
                     "Budget exhausted: %.2f hours elapsed (max=%.1f)",
-                    elapsed_hours, self.cfg.max_wall_clock_hours,
+                    elapsed_hours,
+                    self.cfg.max_wall_clock_hours,
                 )
                 return True
 
@@ -491,7 +512,8 @@ class Orchestrator:
             if estimated_cost >= self.cfg.max_dollars:
                 logger.info(
                     "Budget exhausted: estimated cost $%.4f >= $%.2f limit",
-                    estimated_cost, self.cfg.max_dollars,
+                    estimated_cost,
+                    self.cfg.max_dollars,
                 )
                 return True
 

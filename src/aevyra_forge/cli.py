@@ -29,7 +29,7 @@ from typing import Optional
 
 try:
     import typer
-    from typing import Annotated
+
     _TYPER_AVAILABLE = True
 except ImportError:
     _TYPER_AVAILABLE = False
@@ -57,25 +57,42 @@ def main() -> None:
     @app.command()
     def tune(
         model: str = typer.Option(..., "--model", "-m", help="HuggingFace model ID or local path"),
-        hardware: str = typer.Option(..., "--hardware", "-H",
-            help="Hardware spec: vendor/gpu_type[xN] e.g. nvidia/H100x8, amd/MI300X"),
-        workload_jsonl: Optional[Path] = typer.Option(None, "--workload", "-w",
-            help="Path to workload JSONL (prompt + expected_output_tokens per line)"),
-        workload_synthetic: bool = typer.Option(False, "--workload-synthetic",
-            help="Generate a synthetic workload instead of loading one"),
-        playbook: Optional[Path] = typer.Option(None, "--playbook",
-            help="Path to playbook markdown. Defaults to built-in playbook."),
-        llm_provider: str = typer.Option("anthropic/claude-sonnet-4-6", "--llm",
+        hardware: str = typer.Option(
+            ...,
+            "--hardware",
+            "-H",
+            help="Hardware spec: vendor/gpu_type[xN] e.g. nvidia/H100x8, amd/MI300X",
+        ),
+        workload_jsonl: Optional[Path] = typer.Option(
+            None,
+            "--workload",
+            "-w",
+            help="Path to workload JSONL (prompt + expected_output_tokens per line)",
+        ),
+        workload_synthetic: bool = typer.Option(
+            False,
+            "--workload-synthetic",
+            help="Generate a synthetic workload instead of loading one",
+        ),
+        playbook: Optional[Path] = typer.Option(
+            None, "--playbook", help="Path to playbook markdown. Defaults to built-in playbook."
+        ),
+        llm_provider: str = typer.Option(
+            "anthropic/claude-sonnet-4-6",
+            "--llm",
             help="LLM for the agent. Format: provider/model. "
-                 "Providers: anthropic, openai, openrouter, groq, together, "
-                 "fireworks, deepinfra, mistral, ollama, lmstudio."),
+            "Providers: anthropic, openai, openrouter, groq, together, "
+            "fireworks, deepinfra, mistral, ollama, lmstudio.",
+        ),
         max_experiments: int = typer.Option(50, help="Max number of experiments"),
         max_hours: float = typer.Option(12.0, help="Max wall-clock hours"),
         max_dollars: Optional[float] = typer.Option(None, help="Max LLM spend in USD"),
         accuracy_floor: float = typer.Option(0.99, help="Min acceptable accuracy (0-1)"),
         min_improvement_pct: float = typer.Option(1.0, help="Min improvement % to keep a recipe"),
         run_dir: Optional[Path] = typer.Option(None, help="Directory for run artifacts"),
-        dry_run: bool = typer.Option(False, "--dry-run", help="Skip vLLM; use synthetic bench results"),
+        dry_run: bool = typer.Option(
+            False, "--dry-run", help="Skip vLLM; use synthetic bench results"
+        ),
         verbose: bool = typer.Option(False, "--verbose", "-v"),
     ) -> None:
         """Run an overnight autotune session and emit the best recipe."""
@@ -102,8 +119,9 @@ def main() -> None:
     @app.command()
     def resume(
         run_dir: Path = typer.Argument(..., help="Run directory from a previous forge tune"),
-        llm_provider: str = typer.Option("anthropic/claude-sonnet-4-6", "--llm",
-            help="LLM for the agent."),
+        llm_provider: str = typer.Option(
+            "anthropic/claude-sonnet-4-6", "--llm", help="LLM for the agent."
+        ),
         verbose: bool = typer.Option(False, "--verbose", "-v"),
     ) -> None:
         """Resume an interrupted autotune run."""
@@ -132,6 +150,7 @@ def main() -> None:
     ) -> None:
         """Print the playbook to stdout."""
         from aevyra_forge.playbook import load_playbook
+
         pb_path = path or _default_playbook_path()
         pb = load_playbook(pb_path)
         for section, text in pb.sections.items():
@@ -143,6 +162,7 @@ def main() -> None:
     ) -> None:
         """Validate playbook YAML front-matter and section headers."""
         from aevyra_forge.playbook import load_playbook
+
         pb_path = path or _default_playbook_path()
         try:
             pb = load_playbook(pb_path)
@@ -157,6 +177,7 @@ def main() -> None:
 # ------------------------------------------------------------------
 # Internals
 # ------------------------------------------------------------------
+
 
 def _setup_logging(verbose: bool) -> None:
     level = logging.DEBUG if verbose else logging.INFO
@@ -190,9 +211,16 @@ def _parse_hardware(hardware_str: str):
 
     # Infer VRAM from GPU type
     mem_map = {
-        "H100": 80, "H200": 141, "B100": 192, "B200": 192,
-        "A100": 80, "A6000": 48, "A10": 24, "T4": 16,
-        "MI300X": 192, "MI250X": 128,
+        "H100": 80,
+        "H200": 141,
+        "B100": 192,
+        "B200": 192,
+        "A100": 80,
+        "A6000": 48,
+        "A10": 24,
+        "T4": 16,
+        "MI300X": 192,
+        "MI250X": 128,
     }
     memory_gb = next(
         (v for k, v in mem_map.items() if k.upper() in gpu_type.upper()),
@@ -213,6 +241,7 @@ def _default_playbook_path() -> Path:
 
 def _make_run_dir(run_dir: "Path | None") -> Path:
     import datetime
+
     if run_dir is not None:
         return run_dir
     ts = datetime.datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
@@ -266,6 +295,7 @@ def _run_tune(
             "Playbook not found at %s — using empty playbook.", pb_path
         )
         from aevyra_forge.playbook import Playbook
+
         playbook = Playbook(raw_markdown="")
     else:
         playbook = load_playbook(pb_path)
@@ -275,16 +305,21 @@ def _run_tune(
 
     # Save run config
     config_path = actual_run_dir / "config.json"
-    config_path.write_text(json.dumps({
-        "model": model,
-        "hardware": hardware_str,
-        "workload": str(workload_jsonl) if workload_jsonl else "synthetic",
-        "llm": llm_provider,
-        "max_experiments": max_experiments,
-        "max_hours": max_hours,
-        "accuracy_floor": accuracy_floor,
-        "dry_run": dry_run,
-    }, indent=2))
+    config_path.write_text(
+        json.dumps(
+            {
+                "model": model,
+                "hardware": hardware_str,
+                "workload": str(workload_jsonl) if workload_jsonl else "synthetic",
+                "llm": llm_provider,
+                "max_experiments": max_experiments,
+                "max_hours": max_hours,
+                "accuracy_floor": accuracy_floor,
+                "dry_run": dry_run,
+            },
+            indent=2,
+        )
+    )
 
     forge_config = ForgeConfig(
         max_experiments=max_experiments,
@@ -334,6 +369,7 @@ def _run_resume(*, run_dir: Path, llm_provider: str) -> None:
     workload_path = cfg.get("workload")
     if workload_path and workload_path != "synthetic":
         from aevyra_forge.workload import workload_from_jsonl
+
         workload = workload_from_jsonl(Path(workload_path))
     else:
         workload = make_synthetic()
@@ -343,6 +379,7 @@ def _run_resume(*, run_dir: Path, llm_provider: str) -> None:
         playbook = load_playbook(pb_path)
     else:
         from aevyra_forge.playbook import Playbook
+
         playbook = Playbook(raw_markdown="")
 
     llm = resolve_llm(llm_provider)

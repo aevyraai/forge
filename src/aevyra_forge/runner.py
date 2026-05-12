@@ -84,6 +84,7 @@ class VLLMRunner:
             return
 
         import os
+
         # Default vLLM to WARNING to keep output clean.
         # Users can override by setting VLLM_LOGGING_LEVEL=INFO before running.
         if "VLLM_LOGGING_LEVEL" not in os.environ:
@@ -107,9 +108,7 @@ class VLLMRunner:
         import sys
         import threading
 
-        self._process = subprocess.Popen(
-            args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
-        )
+        self._process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 
         def _tee(proc: subprocess.Popen, log_file: object) -> None:
             assert proc.stdout is not None
@@ -117,7 +116,7 @@ class VLLMRunner:
                 decoded = line.decode("utf-8", errors="replace")
                 sys.stderr.write(decoded)
                 log_file.write(decoded)  # type: ignore[attr-defined]
-                log_file.flush()         # type: ignore[attr-defined]
+                log_file.flush()  # type: ignore[attr-defined]
 
         self._tee_thread = threading.Thread(
             target=_tee, args=(self._process, self._log_file), daemon=True
@@ -154,8 +153,7 @@ class VLLMRunner:
 
         self.stop()
         raise TimeoutError(
-            f"vLLM did not become healthy within {self.startup_timeout_s}s. "
-            f"See {log_path}."
+            f"vLLM did not become healthy within {self.startup_timeout_s}s. See {log_path}."
         )
 
     def stop(self) -> None:
@@ -191,6 +189,7 @@ class VLLMRunner:
     def is_healthy(self) -> bool:
         try:
             import httpx
+
             r = httpx.get(f"{self.url()}/health", timeout=2.0)
             return r.status_code == 200
         except Exception:
@@ -217,9 +216,8 @@ def build_vllm_args(recipe: Recipe) -> list[str]:
         # --swap-space was removed in vLLM 0.6+; skip silently if zero
         try:
             import subprocess
-            result = subprocess.run(
-                ["vllm", "serve", "--help"], capture_output=True, text=True
-            )
+
+            result = subprocess.run(["vllm", "serve", "--help"], capture_output=True, text=True)
             if "--swap-space" in result.stdout or "--swap-space" in result.stderr:
                 args += ["--swap-space", str(cfg.swap_space)]
         except Exception:
@@ -235,7 +233,11 @@ def build_vllm_args(recipe: Recipe) -> list[str]:
     if cfg.attention_backend:
         args += ["--attention-backend", cfg.attention_backend]
     if cfg.speculative_model:
-        args += ["--speculative-model", cfg.speculative_model,
-                 "--num-speculative-tokens", str(cfg.num_speculative_tokens)]
+        args += [
+            "--speculative-model",
+            cfg.speculative_model,
+            "--num-speculative-tokens",
+            str(cfg.num_speculative_tokens),
+        ]
 
     return args

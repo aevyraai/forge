@@ -88,17 +88,19 @@ class ExperimentStore:
                     expected_accuracy_delta=ad.get("expected_accuracy_delta"),
                     raw_response=ad.get("raw_response", ""),
                 )
-            exps.append(Exp(
-                id=d["id"],
-                recipe=Recipe.from_dict(d["recipe"]),
-                bench_result=bench,
-                agent_decision=decision,
-                score=d.get("score"),
-                kept=d.get("kept", False),
-                duration_s=d.get("duration_s", 0.0),
-                started_at=d.get("started_at", 0.0),
-                ended_at=d.get("ended_at", 0.0),
-            ))
+            exps.append(
+                Exp(
+                    id=d["id"],
+                    recipe=Recipe.from_dict(d["recipe"]),
+                    bench_result=bench,
+                    agent_decision=decision,
+                    score=d.get("score"),
+                    kept=d.get("kept", False),
+                    duration_s=d.get("duration_s", 0.0),
+                    started_at=d.get("started_at", 0.0),
+                    ended_at=d.get("ended_at", 0.0),
+                )
+            )
         return exps
 
     def best(self) -> Experiment | None:
@@ -108,22 +110,30 @@ class ExperimentStore:
 
     def render_tsv(self) -> str:
         """Human-readable summary table."""
-        header = "\t".join(["exp", "id", "gen", "score", "throughput", "p99_ms",
-                            "accuracy", "kept", "rationale"])
+        header = "\t".join(
+            ["exp", "id", "gen", "score", "throughput", "p99_ms", "accuracy", "kept", "rationale"]
+        )
         rows = [header]
         for i, exp in enumerate(self.history()):
             br = exp.bench_result
-            rationale = (exp.agent_decision.rationale[:60].replace("\t", " ")
-                         if exp.agent_decision else "")
-            rows.append("\t".join([
-                str(i), exp.id, str(exp.recipe.generation),
-                f"{exp.score:.4f}" if exp.score is not None else "-",
-                f"{br.throughput_tokens_per_sec:.1f}" if br else "-",
-                f"{br.p99_latency_ms:.0f}" if br else "-",
-                f"{br.accuracy_score:.3f}" if br and br.accuracy_score is not None else "-",
-                "✓" if exp.kept else "✗",
-                rationale,
-            ]))
+            rationale = (
+                exp.agent_decision.rationale[:60].replace("\t", " ") if exp.agent_decision else ""
+            )
+            rows.append(
+                "\t".join(
+                    [
+                        str(i),
+                        exp.id,
+                        str(exp.recipe.generation),
+                        f"{exp.score:.4f}" if exp.score is not None else "-",
+                        f"{br.throughput_tokens_per_sec:.1f}" if br else "-",
+                        f"{br.p99_latency_ms:.0f}" if br else "-",
+                        f"{br.accuracy_score:.3f}" if br and br.accuracy_score is not None else "-",
+                        "✓" if exp.kept else "✗",
+                        rationale,
+                    ]
+                )
+            )
         return "\n".join(rows)
 
     def render_pareto(self) -> str:

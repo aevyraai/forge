@@ -91,8 +91,7 @@ def mutate(recipe: Recipe, mutation: dict[str, Any]) -> Recipe:
     for field_name, value in changes.items():
         if field_name not in current:
             raise ValueError(
-                f"Unknown VLLMConfig field: {field_name!r}. "
-                f"Known fields: {sorted(current.keys())}"
+                f"Unknown VLLMConfig field: {field_name!r}. Known fields: {sorted(current.keys())}"
             )
         if field_name in space and value not in space[field_name]:
             raise ValueError(
