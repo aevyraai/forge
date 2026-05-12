@@ -177,6 +177,7 @@ def safe_max_model_len(
     gpu_memory_utilization: float = 0.90,
     quant_method: str = "bf16",
     block_size: int = 16,
+    min_context_len: int = 512,
 ) -> int | None:
     """Compute a ``--max-model-len`` value that fits in the KV cache budget.
 
@@ -211,8 +212,8 @@ def safe_max_model_len(
         max_safe = int(budget_bytes / (kv_bytes_per_token * max(1, max_num_seqs)))
         if max_safe >= native_len:
             return None  # no cap needed
-        # Round down to nearest 256 (vLLM prefers aligned lengths)
-        max_safe = max(512, (max_safe // 256) * 256)
+        # Never go below what the workload actually needs
+        max_safe = max(min_context_len, (max_safe // 256) * 256)
         return max_safe
     else:
         # No HF config: use empirical rule — 1 GB KV budget ≈ 4096 tokens for 8B models
@@ -220,7 +221,9 @@ def safe_max_model_len(
         params_b = float(m.group(1)) if m else 8.0
         tokens_per_gb = max(512, int(32768 / params_b))
         max_safe = int(budget_gb * tokens_per_gb / max(1, max_num_seqs) * 8)
-        return max(512, (max_safe // 256) * 256) if max_safe < 32768 else None
+        if max_safe >= 32768:
+            return None
+        return max(min_context_len, (max_safe // 256) * 256)
 
 
 def _safe_max_num_seqs(
@@ -410,7 +413,11 @@ def mutate(recipe: Recipe, mutation: dict[str, Any]) -> Recipe:
 # ---------------------------------------------------------------------------
 
 
-def baseline_config(hardware: HardwareSpec, model_name: str = "") -> VLLMConfig:
+def baseline_config(
+    hardware: HardwareSpec,
+    model_name: str = "",
+    min_context_len: int = 512,
+) -> VLLMConfig:
     """Reasonable starting defaults for the given hardware + model.
 
     When ``model_name`` is provided the memory budget is used to pick
@@ -448,6 +455,7 @@ def baseline_config(hardware: HardwareSpec, model_name: str = "") -> VLLMConfig:
             model_name,
             max_num_seqs=cfg.max_num_seqs,
             gpu_memory_utilization=cfg.gpu_memory_utilization,
+            min_context_len=min_context_len,
         )
 
     # --- Vendor / GPU specific overrides ---

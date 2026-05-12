@@ -45,6 +45,26 @@ class Workload:
     metadata: dict[str, Any] = field(default_factory=dict)
     concurrency: int = 1  # max simultaneous in-flight requests during benchmarking
 
+    def min_context_tokens(self) -> int:
+        """Minimum ``max_model_len`` needed to serve every request in this workload.
+
+        Computed as the maximum over all requests of:
+            estimated_input_tokens + expected_output_tokens
+
+        Input tokens are estimated using the same 1.3× word-count heuristic
+        as ``summary()``.  Add a 10% safety margin so quantisation and
+        tokeniser differences don't push us over the edge.
+        """
+        if not self.requests:
+            return 512
+        worst = max(
+            int(len(r.prompt.split()) * 1.3) + r.expected_output_tokens
+            for r in self.requests
+        )
+        # Round up to the nearest 256 and add 10% headroom
+        with_margin = int(worst * 1.1)
+        return max(512, ((with_margin + 255) // 256) * 256)
+
     def summary(self) -> dict[str, Any]:
         """Distributions the agent prompt can read."""
         if not self.requests:

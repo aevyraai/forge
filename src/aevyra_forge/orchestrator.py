@@ -123,8 +123,13 @@ class Orchestrator:
         self._runner_args: list[str] = []
         current_layer = "config"
 
-        # Build baseline recipe
-        baseline_cfg = config_mod.baseline_config(self.hardware, model_name=self.model)
+        # Build baseline recipe — pass workload's min context so max_model_len
+        # is never capped below what the requests actually need.
+        baseline_cfg = config_mod.baseline_config(
+            self.hardware,
+            model_name=self.model,
+            min_context_len=self.workload.min_context_tokens(),
+        )
         baseline_recipe = Recipe(
             model=self.model,
             hardware=self.hardware,
