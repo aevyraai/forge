@@ -44,11 +44,17 @@ You are the decision agent for Forge — an autonomous LLM serving autotuner.
 # Hardware
 {hardware}
 
+# Memory budget (computed for this hardware + model)
+{memory_budget}
+
 # Current recipe
 {current_recipe_yaml}
 
 # Recent experiments (last {history_window})
 {history_text}
+
+# Search space (legal values for this hardware + model)
+{search_space_text}
 
 # Playbook
 {playbook_text}
@@ -112,6 +118,7 @@ def propose_next_experiment(
     The raw LLM response is preserved so Origin can attribute failures
     back to specific agent statements.
     """
+    from aevyra_forge import config as config_mod
     from aevyra_forge.playbook import format_for_agent
 
     recent = history[-history_window:] if len(history) > history_window else history
@@ -138,12 +145,38 @@ def propose_next_experiment(
     history_text = "\n".join(history_lines) if history_lines else "  (no experiments yet)"
     playbook_text = format_for_agent(playbook, current_recipe.hardware, layer="config")
 
+    # Compute memory budget and legal search space for this hardware + model
+    quant_method = current_recipe.quant.method if current_recipe.quant else "bf16"
+    hw = current_recipe.hardware
+    weight_gb = config_mod.estimate_weight_gb(current_recipe.model, quant_method)
+    budget_90 = config_mod.kv_cache_budget_gb(hw, weight_gb, 0.90)
+    budget_92 = config_mod.kv_cache_budget_gb(hw, weight_gb, 0.92)
+    safe_seqs = config_mod._safe_max_num_seqs(hw, current_recipe.model, quant_method)
+    space = config_mod.search_space(hw, current_recipe.model, quant_method)
+
+    memory_budget = (
+        f"GPU VRAM      : {hw.memory_gb_per_gpu} GB × {hw.count} = {hw.memory_gb_per_gpu * hw.count} GB total\n"
+        f"Model weights : ~{weight_gb:.1f} GB ({quant_method})\n"
+        f"KV cache budget at gpu_memory_utilization=0.90 : {budget_90:.1f} GB\n"
+        f"KV cache budget at gpu_memory_utilization=0.92 : {budget_92:.1f} GB\n"
+        f"Estimated safe max_num_seqs ceiling             : {safe_seqs}\n"
+        f"RULE: Do NOT propose max_num_seqs > {safe_seqs} — it will OOM on this hardware+model."
+    )
+
+    search_space_text = "\n".join(
+        f"  {k}: {v}" for k, v in sorted(space.items())
+        if k in ("max_num_seqs", "max_num_batched_tokens", "block_size",
+                  "gpu_memory_utilization", "kv_cache_dtype", "attention_backend")
+    )
+
     prompt = _AGENT_PROMPT.format(
         workload_summary=workload.summary(),
         hardware=current_recipe.hardware.label(),
+        memory_budget=memory_budget,
         current_recipe_yaml=current_recipe.to_yaml(),
         history_window=len(recent),
         history_text=history_text,
+        search_space_text=search_space_text,
         playbook_text=playbook_text,
     )
 

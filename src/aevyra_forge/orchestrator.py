@@ -124,7 +124,7 @@ class Orchestrator:
         current_layer = "config"
 
         # Build baseline recipe
-        baseline_cfg = config_mod.baseline_config(self.hardware)
+        baseline_cfg = config_mod.baseline_config(self.hardware, model_name=self.model)
         baseline_recipe = Recipe(
             model=self.model,
             hardware=self.hardware,
