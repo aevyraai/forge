@@ -244,6 +244,7 @@ class Orchestrator:
 
                 self.store.append(exp)
                 history = self.store.history()
+                self._print_table(history)
 
         finally:
             self._stop_runner()
@@ -585,6 +586,24 @@ class Orchestrator:
                 return True
 
         return False
+
+    def _print_table(self, history: list[Experiment]) -> None:
+        """Print a compact results table to stdout after each experiment."""
+        header = f"{'#':>3}  {'score':>8}  {'tok/s':>8}  {'p99ms':>6}  {'kept':>4}  {'mutation'}"
+        rows = [header, "─" * 70]
+        for i, e in enumerate(history):
+            br = e.bench_result
+            score_s = f"{e.score:.1f}" if e.score is not None else "-"
+            tps_s = f"{br.throughput_tokens_per_sec:.1f}" if br else "-"
+            p99_s = f"{br.p99_latency_ms:.0f}" if br else "-"
+            kept_s = "✓" if e.kept else "✗"
+            if e.agent_decision:
+                changes = e.agent_decision.mutation.get("changes", {})
+                mut_s = ", ".join(f"{k}={v}" for k, v in changes.items())[:40]
+            else:
+                mut_s = "baseline"
+            rows.append(f"{i:>3}  {score_s:>8}  {tps_s:>8}  {p99_s:>6}  {kept_s:>4}  {mut_s}")
+        print("\n" + "\n".join(rows) + "\n")
 
     def _generate_analysis(
         self,
