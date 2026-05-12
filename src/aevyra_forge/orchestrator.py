@@ -240,6 +240,15 @@ class Orchestrator:
         logger.info("forge   best recipe gen   : %d  id=%s",
                     best_recipe.generation, best_recipe.id)
         logger.info("forge ══════════════════════════════════════════")
+
+        analysis = self._generate_analysis(history, baseline_score, best_score, elapsed)
+        if analysis:
+            print("\n" + "─" * 60)
+            print("  Forge Analysis")
+            print("─" * 60)
+            print(analysis)
+            print("─" * 60 + "\n")
+
         return best_recipe, history
 
     def resume(self) -> tuple[Recipe, list[Experiment]]:
@@ -480,3 +489,56 @@ class Orchestrator:
                 return True
 
         return False
+
+    def _generate_analysis(
+        self,
+        history: list[Experiment],
+        baseline_score: float,
+        best_score: float,
+        elapsed_s: float,
+    ) -> str:
+        """Call the agent LLM to produce a plain-English post-run analysis.
+
+        Returns the analysis string, or an empty string if the LLM call fails.
+        """
+        try:
+            kept = [e for e in history if e.kept]
+            reverted = [e for e in history if not e.kept and e.agent_decision is not None]
+
+            # Summarise what mutations were tried
+            tried: list[str] = []
+            for e in history:
+                if e.agent_decision:
+                    changes = e.agent_decision.mutation.get("changes", {})
+                    for k, v in changes.items():
+                        tried.append(f"{k}={v} ({'kept' if e.kept else 'reverted'})")
+
+            tried_str = "; ".join(tried[:20]) or "none"
+            improvement_pct = 100 * (best_score - baseline_score) / max(baseline_score, 1e-9)
+            hw = self.hardware
+
+            prompt = f"""\
+You are analyzing the results of an automated vLLM deployment optimization run.
+
+Hardware: {hw.vendor} {hw.gpu_type} x{hw.count} ({hw.memory_gb_per_gpu} GB VRAM each)
+Model: {self.model}
+Total experiments: {len(history)}
+Kept (improved): {len(kept)}
+Reverted: {len(reverted)}
+Baseline throughput: {baseline_score:.1f} tok/s
+Best throughput: {best_score:.1f} tok/s
+Improvement: {improvement_pct:.1f}%
+Wall time: {elapsed_s / 60:.0f} min
+Mutations tried: {tried_str}
+
+Write a short analysis (4-6 sentences) for the user. Cover:
+1. What the results mean (e.g. baseline=best means the hardware is already near its ceiling for this config, or significant gain means chunked prefill / prefix caching helped)
+2. Why configs did or didn't move the needle (memory bandwidth ceiling, KV-cache pressure, batch size already optimal, etc.)
+3. One or two concrete next steps the user should try (different hardware, real workload instead of synthetic, quantization, speculative decoding, etc.)
+
+Be direct and specific. No bullet points. No markdown headers. Just plain prose."""
+
+            return self.llm(prompt).strip()
+        except Exception as exc:
+            logger.debug("Post-run analysis failed: %s", exc)
+            return ""
