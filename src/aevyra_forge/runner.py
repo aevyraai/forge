@@ -84,7 +84,7 @@ class VLLMRunner:
             return
 
         import os
-        # Default vLLM logs to WARNING to keep output clean.
+        # Default vLLM to WARNING to keep output clean.
         # Users can override by setting VLLM_LOGGING_LEVEL=INFO before running.
         if "VLLM_LOGGING_LEVEL" not in os.environ:
             os.environ["VLLM_LOGGING_LEVEL"] = "WARNING"
@@ -94,6 +94,9 @@ class VLLMRunner:
             )
 
         args = ["vllm", "serve"] + build_vllm_args(self.recipe)
+        # Suppress uvicorn access logs (separate from VLLM_LOGGING_LEVEL)
+        if os.environ.get("VLLM_LOGGING_LEVEL", "WARNING").upper() == "WARNING":
+            args += ["--uvicorn-log-level", "warning"]
         log_path = self.work_dir / f"vllm_{self.recipe.id}.log"
         self.work_dir.mkdir(parents=True, exist_ok=True)
         logger.info("forge │  starting vLLM  log → %s", log_path)
