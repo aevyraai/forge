@@ -37,6 +37,7 @@ if TYPE_CHECKING:
     from aevyra_forge.llm import LLMFn
     from aevyra_forge.playbook import Playbook
     from aevyra_forge.result import ExperimentStore
+    from aevyra_forge.runner import VLLMRunner
 
 
 logger = logging.getLogger(__name__)
@@ -118,6 +119,8 @@ class Orchestrator:
         from aevyra_forge.recipe import Recipe
 
         self._run_start = time.time()
+        self._runner = None
+        self._runner_args: list[str] = []
         current_layer = "config"
 
         # Build baseline recipe
@@ -128,118 +131,122 @@ class Orchestrator:
             config=baseline_cfg,
         )
 
-        # Run baseline experiment
-        logger.info("forge ┌─ experiment 0/%d  [baseline]", self.cfg.max_experiments)
-        baseline_exp = self._run_one(baseline_recipe, agent_decision=None)
-        baseline_exp.kept = True
-        self.store.append(baseline_exp)
+        try:
+            # Run baseline experiment
+            logger.info("forge ┌─ experiment 0/%d  [baseline]", self.cfg.max_experiments)
+            baseline_exp = self._run_one(baseline_recipe, agent_decision=None)
+            baseline_exp.kept = True
+            self.store.append(baseline_exp)
 
-        history = self.store.history()
-        current_recipe = baseline_recipe
-        best_score = baseline_exp.score or 0.0
-
-        logger.info(
-            "forge └─ baseline  score=%.1f tok/s  p99=%.0fms  status=%s",
-            best_score,
-            baseline_exp.bench_result.p99_latency_ms if baseline_exp.bench_result else 0.0,
-            baseline_exp.bench_result.status if baseline_exp.bench_result else "?",
-        )
-
-        while not self._is_converged(history) and not self._budget_exhausted(history):
-            # Maybe escalate layer
-            if self.cfg.layer_escalation:
-                current_layer = self._should_escalate(history, current_layer)
-
-            # Ask agent for next mutation
-            exp_n = len(history)
-            logger.info(
-                "forge │  experiment %d/%d — asking agent...",
-                exp_n,
-                self.cfg.max_experiments,
-            )
-            _tokens_before = getattr(self.llm, "tokens_used", 0)
-            try:
-                from aevyra_forge import agent as agent_mod
-
-                decision = agent_mod.propose_next_experiment(
-                    history=history,
-                    playbook=self.playbook,
-                    current_recipe=current_recipe,
-                    workload=self.workload,
-                    llm=self.llm,
-                )
-            except Exception as exc:
-                logger.warning("forge │  agent call failed: %s — skipping", exc)
-                continue
-            _exp_tokens = getattr(self.llm, "tokens_used", 0) - _tokens_before
-            logger.info("forge │  tokens    : %d", _exp_tokens)
-
-            # Empty changes = agent says converged
-            if not decision.mutation.get("changes"):
-                logger.info("forge │  agent returned empty mutation — converged.")
-                break
+            history = self.store.history()
+            current_recipe = baseline_recipe
+            best_score = baseline_exp.score or 0.0
 
             logger.info(
-                "forge ┌─ experiment %d/%d",
-                exp_n,
-                self.cfg.max_experiments,
+                "forge └─ baseline  score=%.1f tok/s  p99=%.0fms  status=%s",
+                best_score,
+                baseline_exp.bench_result.p99_latency_ms if baseline_exp.bench_result else 0.0,
+                baseline_exp.bench_result.status if baseline_exp.bench_result else "?",
             )
-            logger.info("forge │  rationale : %s", decision.rationale)
-            logger.info("forge │  mutation  : %s", decision.mutation.get("changes", {}))
 
-            # Apply mutation
-            try:
-                from aevyra_forge import config as config_mod
+            while not self._is_converged(history) and not self._budget_exhausted(history):
+                # Maybe escalate layer
+                if self.cfg.layer_escalation:
+                    current_layer = self._should_escalate(history, current_layer)
 
-                candidate = config_mod.mutate(current_recipe, decision.mutation)
-            except (ValueError, NotImplementedError) as exc:
-                logger.warning("Mutation rejected: %s", exc)
-                # Log a failed experiment so the agent sees this region is invalid
-                exp = Experiment(
-                    id=f"rej-{len(history)}",
-                    recipe=current_recipe,
-                    agent_decision=decision,
-                    score=0.0,
-                    kept=False,
+                # Ask agent for next mutation
+                exp_n = len(history)
+                logger.info(
+                    "forge │  experiment %d/%d — asking agent...",
+                    exp_n,
+                    self.cfg.max_experiments,
                 )
+                _tokens_before = getattr(self.llm, "tokens_used", 0)
+                try:
+                    from aevyra_forge import agent as agent_mod
+
+                    decision = agent_mod.propose_next_experiment(
+                        history=history,
+                        playbook=self.playbook,
+                        current_recipe=current_recipe,
+                        workload=self.workload,
+                        llm=self.llm,
+                    )
+                except Exception as exc:
+                    logger.warning("forge │  agent call failed: %s — skipping", exc)
+                    continue
+                _exp_tokens = getattr(self.llm, "tokens_used", 0) - _tokens_before
+                logger.info("forge │  tokens    : %d", _exp_tokens)
+
+                # Empty changes = agent says converged
+                if not decision.mutation.get("changes"):
+                    logger.info("forge │  agent returned empty mutation — converged.")
+                    break
+
+                logger.info(
+                    "forge ┌─ experiment %d/%d",
+                    exp_n,
+                    self.cfg.max_experiments,
+                )
+                logger.info("forge │  rationale : %s", decision.rationale)
+                logger.info("forge │  mutation  : %s", decision.mutation.get("changes", {}))
+
+                # Apply mutation
+                try:
+                    from aevyra_forge import config as config_mod
+
+                    candidate = config_mod.mutate(current_recipe, decision.mutation)
+                except (ValueError, NotImplementedError) as exc:
+                    logger.warning("Mutation rejected: %s", exc)
+                    # Log a failed experiment so the agent sees this region is invalid
+                    exp = Experiment(
+                        id=f"rej-{len(history)}",
+                        recipe=current_recipe,
+                        agent_decision=decision,
+                        score=0.0,
+                        kept=False,
+                    )
+                    self.store.append(exp)
+                    history = self.store.history()
+                    continue
+
+                # Run experiment
+                exp = self._run_one(candidate, agent_decision=decision)
+                exp.llm_tokens = _exp_tokens
+
+                # Keep or revert
+                improvement_threshold = best_score * (1 + self.cfg.min_improvement_pct / 100)
+                p99 = exp.bench_result.p99_latency_ms if exp.bench_result else 0.0
+                dur = exp.duration_s
+                if exp.score is not None and exp.score > improvement_threshold:
+                    exp.kept = True
+                    gain = 100 * (exp.score - best_score) / max(best_score, 1e-9)
+                    current_recipe = candidate
+                    best_score = exp.score
+                    logger.info(
+                        "forge └─ ✓ KEPT      score=%.1f tok/s  p99=%.0fms  +%.1f%%  duration=%.0fs  llm=%d tok",
+                        exp.score,
+                        p99,
+                        gain,
+                        dur,
+                        exp.llm_tokens,
+                    )
+                else:
+                    exp.kept = False
+                    logger.info(
+                        "forge └─ ✗ REVERTED  score=%.1f tok/s  p99=%.0fms  best=%.1f  duration=%.0fs  llm=%d tok",
+                        exp.score or 0.0,
+                        p99,
+                        best_score,
+                        dur,
+                        exp.llm_tokens,
+                    )
+
                 self.store.append(exp)
                 history = self.store.history()
-                continue
 
-            # Run experiment
-            exp = self._run_one(candidate, agent_decision=decision)
-            exp.llm_tokens = _exp_tokens
-
-            # Keep or revert
-            improvement_threshold = best_score * (1 + self.cfg.min_improvement_pct / 100)
-            p99 = exp.bench_result.p99_latency_ms if exp.bench_result else 0.0
-            dur = exp.duration_s
-            if exp.score is not None and exp.score > improvement_threshold:
-                exp.kept = True
-                gain = 100 * (exp.score - best_score) / max(best_score, 1e-9)
-                current_recipe = candidate
-                best_score = exp.score
-                logger.info(
-                    "forge └─ ✓ KEPT      score=%.1f tok/s  p99=%.0fms  +%.1f%%  duration=%.0fs  llm=%d tok",
-                    exp.score,
-                    p99,
-                    gain,
-                    dur,
-                    exp.llm_tokens,
-                )
-            else:
-                exp.kept = False
-                logger.info(
-                    "forge └─ ✗ REVERTED  score=%.1f tok/s  p99=%.0fms  best=%.1f  duration=%.0fs  llm=%d tok",
-                    exp.score or 0.0,
-                    p99,
-                    best_score,
-                    dur,
-                    exp.llm_tokens,
-                )
-
-            self.store.append(exp)
-            history = self.store.history()
+        finally:
+            self._stop_runner()
 
         best_exp = self.store.best()
         best_recipe = best_exp.recipe if best_exp else baseline_recipe
@@ -283,6 +290,8 @@ class Orchestrator:
             return self.run()
 
         self._run_start = time.time()
+        self._runner = None
+        self._runner_args = []
         current_recipe = best_exp.recipe
         best_score = best_exp.score or 0.0
         current_layer = "config"
@@ -294,52 +303,107 @@ class Orchestrator:
             len(history),
         )
 
-        while not self._is_converged(history) and not self._budget_exhausted(history):
-            if self.cfg.layer_escalation:
-                current_layer = self._should_escalate(history, current_layer)
+        try:
+            while not self._is_converged(history) and not self._budget_exhausted(history):
+                if self.cfg.layer_escalation:
+                    current_layer = self._should_escalate(history, current_layer)
 
-            try:
-                from aevyra_forge import agent as agent_mod
+                try:
+                    from aevyra_forge import agent as agent_mod
 
-                decision = agent_mod.propose_next_experiment(
-                    history=history,
-                    playbook=self.playbook,
-                    current_recipe=current_recipe,
-                    workload=self.workload,
-                    llm=self.llm,
-                )
-            except Exception as exc:
-                logger.warning("Agent call failed: %s — skipping", exc)
-                continue
+                    decision = agent_mod.propose_next_experiment(
+                        history=history,
+                        playbook=self.playbook,
+                        current_recipe=current_recipe,
+                        workload=self.workload,
+                        llm=self.llm,
+                    )
+                except Exception as exc:
+                    logger.warning("Agent call failed: %s — skipping", exc)
+                    continue
 
-            if not decision.mutation.get("changes"):
-                logger.info("Agent returned empty mutation — converged.")
-                break
+                if not decision.mutation.get("changes"):
+                    logger.info("Agent returned empty mutation — converged.")
+                    break
 
-            try:
-                from aevyra_forge import config as config_mod
+                try:
+                    from aevyra_forge import config as config_mod
 
-                candidate = config_mod.mutate(current_recipe, decision.mutation)
-            except (ValueError, NotImplementedError) as exc:
-                logger.warning("Mutation rejected: %s", exc)
-                continue
+                    candidate = config_mod.mutate(current_recipe, decision.mutation)
+                except (ValueError, NotImplementedError) as exc:
+                    logger.warning("Mutation rejected: %s", exc)
+                    continue
 
-            exp = self._run_one(candidate, agent_decision=decision)
+                exp = self._run_one(candidate, agent_decision=decision)
 
-            improvement_threshold = best_score * (1 + self.cfg.min_improvement_pct / 100)
-            if exp.score is not None and exp.score > improvement_threshold:
-                exp.kept = True
-                current_recipe = candidate
-                best_score = exp.score
-            else:
-                exp.kept = False
+                improvement_threshold = best_score * (1 + self.cfg.min_improvement_pct / 100)
+                if exp.score is not None and exp.score > improvement_threshold:
+                    exp.kept = True
+                    current_recipe = candidate
+                    best_score = exp.score
+                else:
+                    exp.kept = False
 
-            self.store.append(exp)
-            history = self.store.history()
+                self.store.append(exp)
+                history = self.store.history()
+
+        finally:
+            self._stop_runner()
 
         best_exp = self.store.best()
         best_recipe = best_exp.recipe if best_exp else current_recipe
         return best_recipe, history
+
+    def _ensure_runner(self, recipe: Recipe) -> "VLLMRunner":
+        """Return a healthy VLLMRunner for *recipe*, restarting only when necessary.
+
+        Restart is triggered when:
+        - No server is currently running.
+        - The vLLM argv for the new recipe differs from the running one.
+        - The running process has died (``is_healthy()`` returns False).
+
+        In dry-run mode a lightweight stub runner is always returned; the
+        server is never actually started.
+        """
+        from aevyra_forge.runner import VLLMRunner, build_vllm_args
+
+        new_args = build_vllm_args(recipe) if not self.cfg.dry_run else []
+
+        runner: VLLMRunner | None = getattr(self, "_runner", None)
+        current_args: list[str] = getattr(self, "_runner_args", [])
+
+        need_restart = (
+            runner is None
+            or new_args != current_args
+            or (not self.cfg.dry_run and not runner.is_healthy())
+        )
+
+        if need_restart:
+            if runner is not None:
+                logger.info("forge │  vLLM restarting (config changed)")
+                runner.stop()
+            else:
+                logger.info("forge │  vLLM starting")
+            runner = VLLMRunner(
+                recipe,
+                self.cfg.work_dir,
+                dry_run=self.cfg.dry_run,
+            )
+            runner.start()
+            self._runner: VLLMRunner | None = runner
+            self._runner_args: list[str] = new_args
+        else:
+            logger.info("forge │  vLLM reused (args unchanged)")
+
+        return runner  # type: ignore[return-value]
+
+    def _stop_runner(self) -> None:
+        """Stop the persistent runner if one is running."""
+        runner = getattr(self, "_runner", None)
+        if runner is not None:
+            runner.stop()
+            self._runner = None
+            self._runner_args = []
 
     def _run_one(
         self,
@@ -347,11 +411,15 @@ class Orchestrator:
         *,
         agent_decision: "AgentDecision | None",
     ) -> Experiment:
-        """Boot server, benchmark, score. Never raises — failures captured in BenchResult."""
+        """Ensure vLLM is running for *recipe*, benchmark, score.
+
+        Never raises — failures are captured in BenchResult.
+        The server is kept alive after this call; ``_stop_runner`` tears it
+        down at the end of the full run.
+        """
         import time
 
         from aevyra_forge.bench import benchmark, score as bench_score
-        from aevyra_forge.runner import VLLMRunner
 
         t_start = time.time()
         exp = Experiment(
@@ -362,22 +430,21 @@ class Orchestrator:
         )
 
         try:
-            with VLLMRunner(
-                recipe,
-                self.cfg.work_dir,
+            runner = self._ensure_runner(recipe)
+            bench_result = benchmark(
+                server_url=runner.url(),
+                workload=self.workload,
+                recipe_id=recipe.id,
+                workload_id=self.workload.metadata.get("id", "default"),
+                accuracy_check=True,
+                timeout_s=600,
                 dry_run=self.cfg.dry_run,
-            ) as runner:
-                bench_result = benchmark(
-                    server_url=runner.url(),
-                    workload=self.workload,
-                    recipe_id=recipe.id,
-                    workload_id=self.workload.metadata.get("id", "default"),
-                    accuracy_check=True,
-                    timeout_s=600,
-                    dry_run=self.cfg.dry_run,
-                )
+            )
         except Exception as exc:
             logger.error("Runner/bench failed for recipe %s: %s", recipe.id, exc)
+            # Mark the runner as dead so the next experiment forces a fresh start
+            self._runner = None
+            self._runner_args = []
             bench_result = BenchResult(
                 throughput_tokens_per_sec=0.0,
                 p50_latency_ms=0.0,
