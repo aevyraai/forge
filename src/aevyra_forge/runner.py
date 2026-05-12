@@ -169,7 +169,17 @@ def build_vllm_args(recipe: Recipe) -> list[str]:
     args += ["--max-num-batched-tokens", str(cfg.max_num_batched_tokens)]
     args += ["--block-size", str(cfg.block_size)]
     args += ["--gpu-memory-utilization", str(cfg.gpu_memory_utilization)]
-    args += ["--swap-space", str(cfg.swap_space)]
+    if cfg.swap_space > 0:
+        # --swap-space was removed in vLLM 0.6+; skip silently if zero
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["vllm", "serve", "--help"], capture_output=True, text=True
+            )
+            if "--swap-space" in result.stdout or "--swap-space" in result.stderr:
+                args += ["--swap-space", str(cfg.swap_space)]
+        except Exception:
+            pass
     args += ["--kv-cache-dtype", cfg.kv_cache_dtype]
     args += ["--tensor-parallel-size", str(cfg.tensor_parallel_size)]
     args += ["--pipeline-parallel-size", str(cfg.pipeline_parallel_size)]
