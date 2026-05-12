@@ -304,18 +304,36 @@ def benchmark(
 
     t_start = time.monotonic()
 
+    _coro = _benchmark_async(
+        server_url=server_url,
+        workload=workload,
+        model_id=model_id,
+        use_chat=use_chat,
+        concurrency=concurrency,
+        timeout_s=timeout_s,
+    )
+
     try:
-        latencies, ttfts, total_output_tokens, errors = asyncio.run(
-            _benchmark_async(
-                server_url=server_url,
-                workload=workload,
-                model_id=model_id,
-                use_chat=use_chat,
-                concurrency=concurrency,
-                timeout_s=timeout_s,
-            )
-        )
+        # Colab / Jupyter kernels run their own event loop, so asyncio.run()
+        # raises "This event loop is already running". Work around by running
+        # the coroutine in a dedicated background thread that owns its loop.
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+
+        if running_loop is not None and running_loop.is_running():
+            import concurrent.futures
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(asyncio.run, _coro)
+                latencies, ttfts, total_output_tokens, errors = future.result(
+                    timeout=timeout_s + 30
+                )
+        else:
+            latencies, ttfts, total_output_tokens, errors = asyncio.run(_coro)
     except Exception as exc:
+        _coro.close()  # prevent "coroutine never awaited" RuntimeWarning
         elapsed = time.monotonic() - t_start
         return BenchResult(
             throughput_tokens_per_sec=0.0,
