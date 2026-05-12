@@ -448,15 +448,10 @@ def baseline_config(
     if tier in ("small", "medium"):
         cfg.max_num_batched_tokens = min(cfg.max_num_batched_tokens, 8192)
 
-    # --- max_model_len: cap when the model's native context window won't fit ---
-    if model_name:
-        cfg.max_model_len = safe_max_model_len(
-            hardware,
-            model_name,
-            max_num_seqs=cfg.max_num_seqs,
-            gpu_memory_utilization=cfg.gpu_memory_utilization,
-            min_context_len=min_context_len,
-        )
+    # max_model_len is left as None (= model's native context length).
+    # Capping it is only needed if the agent explicitly proposes it.
+    # The right lever for KV memory pressure is max_num_seqs (already
+    # capped via _safe_max_num_seqs in the search space).
 
     # --- Vendor / GPU specific overrides ---
     if vendor == "nvidia":
