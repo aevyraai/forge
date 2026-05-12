@@ -53,6 +53,7 @@ class Experiment:
     duration_s: float = 0.0
     started_at: float = 0.0
     ended_at: float = 0.0
+    llm_tokens: int = 0
 
 
 @dataclass
@@ -156,6 +157,7 @@ class Orchestrator:
                 "forge │  experiment %d/%d — asking agent...",
                 exp_n, self.cfg.max_experiments,
             )
+            _tokens_before = getattr(self.llm, "tokens_used", 0)
             try:
                 from aevyra_forge import agent as agent_mod
                 decision = agent_mod.propose_next_experiment(
@@ -168,6 +170,8 @@ class Orchestrator:
             except Exception as exc:
                 logger.warning("forge │  agent call failed: %s — skipping", exc)
                 continue
+            _exp_tokens = getattr(self.llm, "tokens_used", 0) - _tokens_before
+            logger.info("forge │  tokens    : %d", _exp_tokens)
 
             # Empty changes = agent says converged
             if not decision.mutation.get("changes"):
@@ -201,6 +205,7 @@ class Orchestrator:
 
             # Run experiment
             exp = self._run_one(candidate, agent_decision=decision)
+            exp.llm_tokens = _exp_tokens
 
             # Keep or revert
             improvement_threshold = best_score * (1 + self.cfg.min_improvement_pct / 100)
@@ -212,14 +217,14 @@ class Orchestrator:
                 current_recipe = candidate
                 best_score = exp.score
                 logger.info(
-                    "forge └─ ✓ KEPT      score=%.1f tok/s  p99=%.0fms  +%.1f%%  duration=%.0fs",
-                    exp.score, p99, gain, dur,
+                    "forge └─ ✓ KEPT      score=%.1f tok/s  p99=%.0fms  +%.1f%%  duration=%.0fs  llm=%d tok",
+                    exp.score, p99, gain, dur, exp.llm_tokens,
                 )
             else:
                 exp.kept = False
                 logger.info(
-                    "forge └─ ✗ REVERTED  score=%.1f tok/s  p99=%.0fms  best=%.1f  duration=%.0fs",
-                    exp.score or 0.0, p99, best_score, dur,
+                    "forge └─ ✗ REVERTED  score=%.1f tok/s  p99=%.0fms  best=%.1f  duration=%.0fs  llm=%d tok",
+                    exp.score or 0.0, p99, best_score, dur, exp.llm_tokens,
                 )
 
             self.store.append(exp)
@@ -231,12 +236,14 @@ class Orchestrator:
         total_gain = 100 * (best_score - baseline_score) / max(baseline_score, 1e-9)
         elapsed = time.time() - self._run_start
         kept_count = sum(1 for e in history if e.kept)
+        total_llm_tokens = sum(e.llm_tokens for e in history)
         logger.info("forge ══════════════════════════════════════════")
         logger.info("forge   total experiments : %d", len(history))
         logger.info("forge   kept              : %d", kept_count)
         logger.info("forge   baseline score    : %.1f tok/s", baseline_score)
         logger.info("forge   best score        : %.1f tok/s  (+%.1f%%)", best_score, total_gain)
         logger.info("forge   wall time         : %.0f min", elapsed / 60)
+        logger.info("forge   llm tokens used   : %d", total_llm_tokens)
         logger.info("forge   best recipe gen   : %d  id=%s",
                     best_recipe.generation, best_recipe.id)
         logger.info("forge ══════════════════════════════════════════")
