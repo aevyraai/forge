@@ -228,6 +228,45 @@ async def _benchmark_async(
 # ---------------------------------------------------------------------------
 
 
+def warmup(
+    *,
+    server_url: str,
+    workload: Workload,
+    n_requests: int = 10,
+    timeout_s: int = 120,
+) -> None:
+    """Send a small subset of the workload to bring vLLM to steady state.
+
+    Ensures every experiment is benchmarked with a warm KV prefix cache and
+    warmed-up CUDA kernels, making comparisons fair regardless of whether
+    vLLM was just restarted or reused from the previous experiment.
+
+    Uses the first ``n_requests`` which share the common prefix (if any) so
+    that the prefix cache is populated before the timed run starts. Errors
+    are silently ignored — this is best-effort.
+    """
+    if not workload.requests:
+        return
+    warm_requests = workload.requests[:n_requests]
+    warm_wl = Workload(
+        requests=warm_requests,
+        duration_s=workload.duration_s,
+        concurrency=min(workload.concurrency, n_requests),
+    )
+    logger.info("forge │  warmup: %d requests (cache prime + kernel warm)", len(warm_requests))
+    try:
+        benchmark(
+            server_url=server_url,
+            workload=warm_wl,
+            recipe_id="warmup",
+            workload_id="warmup",
+            accuracy_check=False,
+            timeout_s=timeout_s,
+        )
+    except Exception as exc:
+        logger.debug("Warmup failed (non-fatal): %s", exc)
+
+
 def benchmark(
     *,
     server_url: str,

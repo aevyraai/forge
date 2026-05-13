@@ -446,7 +446,7 @@ class Orchestrator:
         """
         import time
 
-        from aevyra_forge.bench import benchmark, score as bench_score
+        from aevyra_forge.bench import benchmark, score as bench_score, warmup
 
         t_start = time.time()
         exp = Experiment(
@@ -458,6 +458,8 @@ class Orchestrator:
 
         try:
             runner = self._ensure_runner(recipe)
+            if not self.cfg.dry_run:
+                warmup(server_url=runner.url(), workload=self.workload)
             bench_result = benchmark(
                 server_url=runner.url(),
                 workload=self.workload,
