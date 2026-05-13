@@ -468,7 +468,8 @@ class Orchestrator:
                 dry_run=self.cfg.dry_run,
             )
         except Exception as exc:
-            logger.error("Runner/bench failed for recipe %s: %s", recipe.id, exc)
+            error_str = str(exc)
+            logger.error("Runner/bench failed for recipe %s: %s", recipe.id, error_str)
             # Stop the failed runner so log file handles and tee thread are cleaned up,
             # then mark it dead so the next experiment forces a fresh start.
             old_runner = getattr(self, "_runner", None)
@@ -479,6 +480,25 @@ class Orchestrator:
                     pass
             self._runner = None
             self._runner_args = []
+
+            # vLLM suggests a safe max_model_len in the OOM message — apply it
+            # so the NEXT experiment starts with a working context length.
+            import re as _re
+            _m = _re.search(r"estimated maximum model length is (\d+)", error_str)
+            if _m:
+                suggested = int(_m.group(1))
+                min_ctx = self.workload.min_context_tokens()
+                if suggested >= min_ctx:
+                    logger.info(
+                        "forge │  applying vLLM-suggested max_model_len=%d to current recipe",
+                        suggested,
+                    )
+                    import copy as _copy
+                    new_cfg = _copy.deepcopy(recipe.config)
+                    new_cfg.max_model_len = suggested
+                    # Update the running recipe so subsequent experiments inherit it
+                    recipe = _copy.deepcopy(recipe)
+                    recipe.config = new_cfg
             bench_result = BenchResult(
                 throughput_tokens_per_sec=0.0,
                 p50_latency_ms=0.0,
@@ -623,26 +643,41 @@ class Orchestrator:
     def _find_duplicate(
         self, history: list[Experiment], proposed_changes: dict
     ) -> "Experiment | None":
-        """Return a previous experiment whose changes are a superset of
-        ``proposed_changes`` AND whose result was CRASH, FAIL, or score=0.
+        """Return a previous experiment with the same changes that is not
+        worth retrying.
 
-        This prevents the agent from re-proposing a mutation that already
-        failed, regardless of how the prompt constraint is phrased.
+        Blocks re-proposing if the same (field, value) set was already tried
+        and resulted in any of:
+        - CRASH or FAIL status
+        - score=0
+        - successfully ran but was REVERTED (score < best at the time)
+
+        Retrying a REVERTED experiment only makes sense if the base recipe
+        changed significantly enough to expect a different outcome.  We allow
+        it if the current best recipe has different values for the proposed
+        fields — meaning the knob hasn't been tried at this starting point.
         """
         if not proposed_changes:
             return None
-        for exp in history:
+
+        for exp in reversed(history):  # most recent first
             if not exp.agent_decision:
                 continue
             past_changes = exp.agent_decision.mutation.get("changes", {})
-            # All proposed keys must match the past experiment's values
             if not all(past_changes.get(k) == v for k, v in proposed_changes.items()):
                 continue
+
             br = exp.bench_result
+            # Always block crashed / failed mutations
             if br and br.status in ("CRASH", "FAIL"):
                 return exp
             if exp.score == 0.0 and not exp.kept:
                 return exp
+            # Block successfully-run but reverted mutations too — the agent
+            # already observed this outcome and should try something different
+            if not exp.kept and br and br.status == "PASS":
+                return exp
+
         return None
 
     def _print_table(self, history: list[Experiment]) -> None:
