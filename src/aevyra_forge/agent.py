@@ -158,8 +158,15 @@ def propose_next_experiment(
     weight_gb = config_mod.estimate_weight_gb(current_recipe.model, quant_method)
     budget_90 = config_mod.kv_cache_budget_gb(hw, weight_gb, 0.90)
     budget_92 = config_mod.kv_cache_budget_gb(hw, weight_gb, 0.92)
-    safe_seqs = config_mod._safe_max_num_seqs(hw, current_recipe.model, quant_method)
+    computed_safe_seqs = config_mod._safe_max_num_seqs(hw, current_recipe.model, quant_method)
+    # If the current recipe is already running at a higher value without OOM,
+    # the formula is too conservative — trust the observed working value.
+    actual_seqs = current_recipe.config.max_num_seqs
+    safe_seqs = max(computed_safe_seqs, actual_seqs)
     space = config_mod.search_space(hw, current_recipe.model, quant_method)
+    # Ensure the search space reflects the observed working ceiling
+    if safe_seqs not in space.get("max_num_seqs", []):
+        space["max_num_seqs"] = sorted(set(space.get("max_num_seqs", [])) | {safe_seqs})
 
     kv_cfg = config_mod.fetch_model_kv_config(current_recipe.model)
     if kv_cfg:
@@ -178,8 +185,11 @@ def propose_next_experiment(
         f"KV calc source  : {kv_source}\n"
         f"KV cache budget at gpu_memory_utilization=0.90 : {budget_90:.1f} GB\n"
         f"KV cache budget at gpu_memory_utilization=0.92 : {budget_92:.1f} GB\n"
-        f"Safe max_num_seqs ceiling : {safe_seqs}\n"
-        f"RULE: Do NOT propose max_num_seqs > {safe_seqs} — it will OOM on this hardware+model."
+        f"Formula ceiling for max_num_seqs : {computed_safe_seqs}\n"
+        f"Observed working max_num_seqs    : {actual_seqs} (current recipe runs without OOM)\n"
+        f"Effective ceiling                : {safe_seqs}\n"
+        f"RULE: max_num_seqs must stay in [{actual_seqs}, {safe_seqs}]. "
+        f"Reducing below {actual_seqs} has already been tried or is pointless — pick a different knob."
     )
 
     search_space_text = "\n".join(

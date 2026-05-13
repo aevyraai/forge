@@ -216,25 +216,56 @@ class Orchestrator:
                 logger.info("forge │  rationale : %s", decision.rationale)
                 logger.info("forge │  mutation  : %s", decision.mutation.get("changes", {}))
 
-                # Reject mutations that exactly match a previous CRASH or FAIL attempt
+                # Reject mutations that exactly match a previous CRASH or FAIL attempt.
+                # Re-ask the agent up to 2 times before logging a dup and moving on,
+                # so a blocked mutation doesn't silently waste an experiment slot.
                 proposed_changes = decision.mutation.get("changes", {})
-                _already_tried = self._find_duplicate(history, proposed_changes, current_recipe)
-                if _already_tried:
+                _dup_retries = 0
+                while True:
+                    _already_tried = self._find_duplicate(
+                        history, proposed_changes, current_recipe
+                    )
+                    if not _already_tried:
+                        break
+                    if _dup_retries >= 2:
+                        logger.warning(
+                            "forge │  agent stuck on duplicate after %d retries — "
+                            "logging dup and moving on",
+                            _dup_retries,
+                        )
+                        exp = Experiment(
+                            id=f"dup-{len(history)}",
+                            recipe=current_recipe,
+                            agent_decision=decision,
+                            score=0.0,
+                            kept=False,
+                        )
+                        self.store.append(exp)
+                        history = self.store.history()
+                        decision = None
+                        break
+                    _dup_retries += 1
                     logger.warning(
-                        "forge │  skipping duplicate mutation %s — already tried as exp %s (%s)",
+                        "forge │  duplicate mutation %s (retry %d/2) — re-asking agent",
                         proposed_changes,
-                        _already_tried.id,
-                        _already_tried.bench_result.status if _already_tried.bench_result else "?",
+                        _dup_retries,
                     )
-                    exp = Experiment(
-                        id=f"dup-{len(history)}",
-                        recipe=current_recipe,
-                        agent_decision=decision,
-                        score=0.0,
-                        kept=False,
-                    )
-                    self.store.append(exp)
-                    history = self.store.history()
+                    try:
+                        from aevyra_forge import agent as agent_mod
+                        decision = agent_mod.propose_next_experiment(
+                            history=history,
+                            playbook=self.playbook,
+                            current_recipe=current_recipe,
+                            workload=self.workload,
+                            llm=self.llm,
+                        )
+                    except Exception as exc:
+                        logger.warning("forge │  agent retry failed: %s", exc)
+                        decision = None
+                        break
+                    proposed_changes = decision.mutation.get("changes", {}) if decision else {}
+
+                if decision is None or not decision.mutation.get("changes"):
                     continue
 
                 # Apply mutation
