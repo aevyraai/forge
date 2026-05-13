@@ -365,9 +365,10 @@ def _run_resume(*, run_dir: "Path | None") -> None:
     hardware = _detect_hardware(device)
 
     workload_path = cfg.get("workload_path", "")
+    concurrency = cfg.get("concurrency", 8)
     if workload_path:
         from aevyra_forge.workload import workload_from_jsonl
-        workload = workload_from_jsonl(Path(workload_path))
+        workload = workload_from_jsonl(Path(workload_path), concurrency=concurrency)
     else:
         from aevyra_forge.workload import workload_synthetic as make_synthetic
         workload = make_synthetic()

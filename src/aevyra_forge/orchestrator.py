@@ -148,6 +148,7 @@ class Orchestrator:
             llm_provider=self.llm_provider,
             device=self.device,
             workload_path=str(self.workload.metadata.get("path", "")),
+            concurrency=self.workload.concurrency,
         )
         logger.info("forge │  run dir: %s", run_handle.path)
 
