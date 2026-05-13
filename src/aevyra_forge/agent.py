@@ -132,12 +132,18 @@ def propose_next_experiment(
         if exp.agent_decision and exp.agent_decision.mutation.get("changes"):
             changes = str(exp.agent_decision.mutation["changes"])
         rationale = exp.agent_decision.rationale[:80] if exp.agent_decision else ""
-        # Mark duplicate-skipped experiments clearly so the agent knows
-        # this exact mutation was already tried and blocked
+        # Mark duplicate-skipped or search-space-rejected experiments clearly
+        # so the agent knows not to propose these values again.
         if exp.id.startswith("dup-"):
             line = (
                 f"  [{exp.id}] DUPLICATE SKIPPED — changes={changes} were already "
                 f"tried and failed. Do not propose this again."
+            )
+        elif exp.id.startswith("rej-"):
+            line = (
+                f"  [{exp.id}] SEARCH SPACE VIOLATION — changes={changes} are ILLEGAL "
+                f"for this hardware+model (value not in the search space listed above). "
+                f"Do not propose these values again under any circumstances."
             )
         else:
             line = (

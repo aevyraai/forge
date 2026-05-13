@@ -226,20 +226,28 @@ def safe_max_model_len(
         return max(min_context_len, (max_safe // 512) * 512)
 
 
-def _safe_batched_tokens(hardware: HardwareSpec) -> list[int]:
+def _safe_batched_tokens(
+    hardware: HardwareSpec,
+    quant_method: str = "bf16",
+) -> list[int]:
     """Legal max_num_batched_tokens values for this hardware tier.
 
     On memory-constrained GPUs, larger values increase activation buffer
     size AND the minimum KV block pool needed for chunked prefill, both
     of which shrink headroom for the KV cache.
+
+    For quantized models (AWQ / GPTQ / int8) the weights are 2-4× smaller,
+    freeing enough VRAM to safely include 4096 even on the small tier.
     """
     tier = _vram_tier(hardware)
-    return {
-        "small":  [2048],                    # T4/V100 16 GB — only the baseline value
+    _is_quant = quant_method.lower() not in ("bf16", "fp16", "fp32", "none", "")
+    base = {
+        "small":  [2048, 4096] if _is_quant else [2048],
         "medium": [2048, 4096, 8192],
         "large":  [4096, 8192, 16384],
         "xlarge": [8192, 16384, 32768],
     }[tier]
+    return base
 
 
 def _safe_max_num_seqs(
@@ -329,7 +337,7 @@ def search_space(
 
     base: dict[str, list[Any]] = {
         "max_num_seqs": seqs,
-        "max_num_batched_tokens": _safe_batched_tokens(hardware),
+        "max_num_batched_tokens": _safe_batched_tokens(hardware, quant_method),
         "block_size": [16, 32] if tier != "small" else [16],
         "gpu_memory_utilization": [0.80, 0.85, 0.88, 0.90, 0.92, 0.95],
         "enable_prefix_caching": [True, False],
