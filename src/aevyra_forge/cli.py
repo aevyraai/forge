@@ -341,6 +341,7 @@ def _run_tune(
         forge_config=forge_config,
         llm_provider=llm_provider,
         device=device,
+        workload_path=str(workload_jsonl.resolve()),
     )
 
     best_recipe, history = orchestrator.run()

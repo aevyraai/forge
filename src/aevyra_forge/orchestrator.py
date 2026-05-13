@@ -88,6 +88,7 @@ class Orchestrator:
         forge_config: ForgeConfig | None = None,
         llm_provider: str = "",
         device: str = "cuda",
+        workload_path: str = "",
     ) -> None:
         self.model = model
         self.hardware = hardware
@@ -98,6 +99,7 @@ class Orchestrator:
         self.cfg = forge_config or ForgeConfig()
         self.llm_provider = llm_provider
         self.device = device
+        self.workload_path = workload_path
         self._run_handle: ForgeRun | None = None  # active run, set in run()/resume()
 
     def run(self) -> tuple[Recipe, list[Experiment]]:
@@ -147,7 +149,7 @@ class Orchestrator:
             forge_config_dict=dataclasses.asdict(self.cfg),
             llm_provider=self.llm_provider,
             device=self.device,
-            workload_path=str(self.workload.metadata.get("path", "")),
+            workload_path=self.workload_path or str(self.workload.metadata.get("path", "")),
             concurrency=self.workload.concurrency,
         )
         logger.info("forge │  run dir: %s", run_handle.path)
