@@ -82,6 +82,7 @@ def main() -> None:
             "Providers: anthropic, openai, openrouter, groq, together, "
             "fireworks, deepinfra, mistral, ollama, lmstudio.",
         ),
+        concurrency: int = typer.Option(8, "--concurrency", "-c", help="Concurrent requests during benchmarking. T4/A10: 8–16, A100/H100: 32–64."),
         max_experiments: int = typer.Option(50, help="Max number of experiments"),
         max_hours: float = typer.Option(12.0, help="Max wall-clock hours"),
         max_dollars: Optional[float] = typer.Option(None, help="Max LLM spend in USD"),
@@ -117,6 +118,7 @@ def main() -> None:
             model=model,
             device=device,
             workload_jsonl=workload_jsonl,
+            concurrency=concurrency,
             playbook_path=playbook,
             llm_provider=llm_provider,
             max_experiments=max_experiments,
@@ -281,6 +283,7 @@ def _run_tune(
     model: str,
     device: str,
     workload_jsonl: "Path",
+    concurrency: int,
     playbook_path: "Path | None",
     llm_provider: str,
     max_experiments: int,
@@ -302,7 +305,7 @@ def _run_tune(
     hardware = _detect_hardware(device)
 
     # Workload
-    workload = workload_from_jsonl(workload_jsonl)
+    workload = workload_from_jsonl(workload_jsonl, concurrency=concurrency)
 
     # Playbook
     pb_path = playbook_path or _default_playbook_path()
