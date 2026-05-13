@@ -68,6 +68,7 @@ class ForgeConfig:
     min_improvement_pct: float = 1.0
     convergence_window: int = 5
     layer_escalation: bool = True
+    exploration_interval: int = 4  # reset to global best every N experiments
     dry_run: bool = False
     work_dir: Path = field(default_factory=lambda: Path("./runs/current"))
 
@@ -159,8 +160,27 @@ class Orchestrator:
                 if self.cfg.layer_escalation:
                     current_layer = self._should_escalate(history, current_layer)
 
-                # Ask agent for next mutation
+                # Periodic re-exploration: reset to global best every N experiments
+                # so the agent can explore branches it couldn't reach from the
+                # current greedy path.
                 exp_n = len(history)
+                if (
+                    self.cfg.exploration_interval > 0
+                    and exp_n > 0
+                    and exp_n % self.cfg.exploration_interval == 0
+                ):
+                    best_exp = self.store.best()
+                    if best_exp and best_exp.recipe.id != current_recipe.id:
+                        logger.info(
+                            "forge │  ↩ re-exploring from best recipe %s "
+                            "(score=%.1f) — interval=%d",
+                            best_exp.recipe.id,
+                            best_score,
+                            self.cfg.exploration_interval,
+                        )
+                        current_recipe = best_exp.recipe
+
+                # Ask agent for next mutation
                 logger.info(
                     "forge │  experiment %d/%d — asking agent...",
                     exp_n,
