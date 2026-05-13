@@ -86,6 +86,8 @@ class Orchestrator:
         llm: "LLMFn",
         store: "ForgeStore",
         forge_config: ForgeConfig | None = None,
+        llm_provider: str = "",
+        device: str = "cuda",
     ) -> None:
         self.model = model
         self.hardware = hardware
@@ -94,6 +96,8 @@ class Orchestrator:
         self.llm = llm
         self.store = store
         self.cfg = forge_config or ForgeConfig()
+        self.llm_provider = llm_provider
+        self.device = device
         self._run_handle: ForgeRun | None = None  # active run, set in run()/resume()
 
     def run(self) -> tuple[Recipe, list[Experiment]]:
@@ -141,6 +145,9 @@ class Orchestrator:
             hardware_label=self.hardware.label(),
             workload_id=self.workload.metadata.get("id", "default"),
             forge_config_dict=dataclasses.asdict(self.cfg),
+            llm_provider=self.llm_provider,
+            device=self.device,
+            workload_path=str(self.workload.metadata.get("path", "")),
         )
         logger.info("forge │  run dir: %s", run_handle.path)
 

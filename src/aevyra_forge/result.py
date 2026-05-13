@@ -101,6 +101,9 @@ class ForgeRun:
         hardware_label: str,
         workload_id: str,
         forge_config_dict: dict[str, Any],
+        llm_provider: str = "",
+        device: str = "cuda",
+        workload_path: str = "",
     ) -> None:
         """Write run metadata. Called once when a new run starts."""
         self.path.mkdir(parents=True, exist_ok=True)
@@ -110,7 +113,10 @@ class ForgeRun:
                 "run_id": self.run_id,
                 "model": model,
                 "hardware": hardware_label,
+                "device": device,
                 "workload_id": workload_id,
+                "workload_path": workload_path,
+                "llm_provider": llm_provider,
                 "forge_config": forge_config_dict,
                 "started_at": _now_iso(),
             },

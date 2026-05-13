@@ -56,15 +56,18 @@ def main() -> None:
     # ------------------------------------------------------------------
     @app.command()
     def tune(
-        model: str = typer.Option(..., "--model", "-m", help="HuggingFace model ID or local path"),
+        action: Optional[str] = typer.Argument(
+            None, help="Optional subcommand: 'resume' to continue an interrupted run."
+        ),
+        model: Optional[str] = typer.Option(None, "--model", "-m", help="HuggingFace model ID or local path"),
         device: str = typer.Option(
             "cuda",
             "--device",
             "-d",
             help="Device backend: cuda (NVIDIA), rocm (AMD), or cpu (dry-run only).",
         ),
-        workload_jsonl: Path = typer.Option(
-            ...,
+        workload_jsonl: Optional[Path] = typer.Option(
+            None,
             "--workload",
             "-w",
             help="Path to workload JSONL (prompt + expected_output_tokens per line)",
@@ -84,14 +87,32 @@ def main() -> None:
         max_dollars: Optional[float] = typer.Option(None, help="Max LLM spend in USD"),
         accuracy_floor: float = typer.Option(0.99, help="Min acceptable accuracy (0-1)"),
         min_improvement_pct: float = typer.Option(1.0, help="Min improvement % to keep a recipe"),
-        run_dir: Optional[Path] = typer.Option(None, help="Directory for run artifacts"),
+        run_dir: Optional[Path] = typer.Option(None, help="ForgeStore root directory (default: .forge)"),
         dry_run: bool = typer.Option(
             False, "--dry-run", help="Skip vLLM; use synthetic bench results"
         ),
         verbose: bool = typer.Option(False, "--verbose", "-v"),
     ) -> None:
-        """Run an overnight autotune session and emit the best recipe."""
+        """Run or resume an autotune session.
+
+        \b
+        aevyra-forge tune            Start a new run
+        aevyra-forge tune resume     Resume the latest interrupted run
+        """
         _setup_logging(verbose)
+
+        if action == "resume":
+            _run_resume(run_dir=run_dir)
+            return
+
+        if action is not None:
+            raise typer.BadParameter(f"Unknown subcommand {action!r}. Did you mean 'resume'?")
+
+        if model is None:
+            raise typer.BadParameter("--model is required when starting a new run.")
+        if workload_jsonl is None:
+            raise typer.BadParameter("--workload is required when starting a new run.")
+
         _run_tune(
             model=model,
             device=device,
@@ -106,21 +127,6 @@ def main() -> None:
             run_dir=run_dir,
             dry_run=dry_run,
         )
-
-    # ------------------------------------------------------------------
-    # forge resume
-    # ------------------------------------------------------------------
-    @app.command()
-    def resume(
-        run_dir: Path = typer.Argument(..., help="Run directory from a previous forge tune"),
-        llm_provider: str = typer.Option(
-            "anthropic/claude-sonnet-4-6", "--llm", help="LLM for the agent."
-        ),
-        verbose: bool = typer.Option(False, "--verbose", "-v"),
-    ) -> None:
-        """Resume an interrupted autotune run."""
-        _setup_logging(verbose)
-        _run_resume(run_dir=run_dir, llm_provider=llm_provider)
 
     # ------------------------------------------------------------------
     # forge report
@@ -330,6 +336,8 @@ def _run_tune(
         llm=llm,
         store=store,
         forge_config=forge_config,
+        llm_provider=llm_provider,
+        device=device,
     )
 
     best_recipe, history = orchestrator.run()
@@ -337,7 +345,7 @@ def _run_tune(
     print(best_recipe.to_yaml())
 
 
-def _run_resume(*, run_dir: Path, llm_provider: str) -> None:
+def _run_resume(*, run_dir: "Path | None") -> None:
     from aevyra_forge.llm import resolve_llm
     from aevyra_forge.orchestrator import ForgeConfig, Orchestrator
     from aevyra_forge.playbook import load_playbook
@@ -350,12 +358,10 @@ def _run_resume(*, run_dir: Path, llm_provider: str) -> None:
         sys.exit(1)
 
     cfg = incomplete.config() or {}
-    # Re-detect hardware from the same machine — vendor stored in config label
-    _label = cfg.get("hardware", "")
-    _device = "rocm" if "amd" in _label.lower() else ("cpu" if "cpu" in _label.lower() else "cuda")
-    hardware = _detect_hardware(_device)
+    device = cfg.get("device", "cuda")
+    hardware = _detect_hardware(device)
 
-    workload_path = cfg.get("workload")
+    workload_path = cfg.get("workload_path", "")
     if workload_path:
         from aevyra_forge.workload import workload_from_jsonl
         workload = workload_from_jsonl(Path(workload_path))
@@ -370,6 +376,7 @@ def _run_resume(*, run_dir: Path, llm_provider: str) -> None:
         from aevyra_forge.playbook import Playbook
         playbook = Playbook(raw_markdown="")
 
+    llm_provider = cfg.get("llm_provider", "anthropic/claude-sonnet-4-6")
     llm = resolve_llm(llm_provider)
 
     forge_cfg = cfg.get("forge_config", {})
@@ -388,6 +395,8 @@ def _run_resume(*, run_dir: Path, llm_provider: str) -> None:
         llm=llm,
         store=store,
         forge_config=forge_config,
+        llm_provider=llm_provider,
+        device=device,
     )
 
     best_recipe, history = orchestrator.resume()
