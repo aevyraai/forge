@@ -140,9 +140,16 @@ class VLLMRunner:
                 pass
             if self._process.poll() is not None:
                 self._tee_thread.join(timeout=2)
+                # Tail the log for the most useful part of the error (last 20 lines).
+                tail = ""
+                try:
+                    lines = log_path.read_text(errors="replace").splitlines()
+                    tail = "\n".join(lines[-20:])
+                except Exception:
+                    pass
                 raise RuntimeError(
                     f"vLLM process exited early (code {self._process.returncode}). "
-                    f"See {log_path} for details."
+                    f"See {log_path} for details.\n{tail}"
                 )
             elapsed_intervals += 1
             if elapsed_intervals % 15 == 0:
@@ -203,6 +210,49 @@ class VLLMRunner:
         self.stop()
 
 
+_VLLM_KNOWN_FLAGS_CACHE: set[str] | None = None
+
+
+def _vllm_known_flags() -> set[str]:
+    """Return the set of flags that ``vllm serve`` actually accepts.
+
+    Parses only lines that start with whitespace followed by ``--`` so that
+    flag names mentioned in *error messages* or deprecation warnings do not
+    pollute the result.  Cached after the first call.
+    """
+    global _VLLM_KNOWN_FLAGS_CACHE
+    if _VLLM_KNOWN_FLAGS_CACHE is not None:
+        return _VLLM_KNOWN_FLAGS_CACHE
+
+    import re
+    import subprocess
+
+    flags: set[str] = set()
+    try:
+        result = subprocess.run(
+            ["vllm", "serve", "--help"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        # Only trust lines whose first non-whitespace token is a --flag
+        for line in result.stdout.splitlines():
+            for match in re.finditer(r"--[\w-]+", line.lstrip()):
+                flags.add(match.group())
+                break  # one flag per line is enough to confirm it exists
+    except Exception:
+        pass
+
+    _VLLM_KNOWN_FLAGS_CACHE = flags
+    return flags
+
+
+def _flag_supported(flag: str) -> bool:
+    """Return True iff ``flag`` (e.g. ``--disable-chunked-prefill``) is
+    listed as a valid ``vllm serve`` argument."""
+    return flag in _vllm_known_flags()
+
+
 def build_vllm_args(recipe: Recipe) -> list[str]:
     """Translate a Recipe into ``vllm serve`` argv."""
     cfg = recipe.config
@@ -212,27 +262,28 @@ def build_vllm_args(recipe: Recipe) -> list[str]:
     args += ["--max-num-batched-tokens", str(cfg.max_num_batched_tokens)]
     args += ["--block-size", str(cfg.block_size)]
     args += ["--gpu-memory-utilization", str(cfg.gpu_memory_utilization)]
-    if cfg.swap_space > 0:
-        # --swap-space was removed in vLLM 0.6+; skip silently if zero
-        try:
-            import subprocess
+    if cfg.max_model_len is not None:
+        args += ["--max-model-len", str(cfg.max_model_len)]
 
-            result = subprocess.run(["vllm", "serve", "--help"], capture_output=True, text=True)
-            if "--swap-space" in result.stdout or "--swap-space" in result.stderr:
-                args += ["--swap-space", str(cfg.swap_space)]
-        except Exception:
-            pass
+    # Gate every optional flag on the installed vLLM version.
+    # _flag_supported() parses --help output and only matches lines that
+    # start with whitespace + "--flag", so deprecation warnings in stderr
+    # cannot cause a removed flag to be re-added.
+    if cfg.swap_space > 0 and _flag_supported("--swap-space"):
+        args += ["--swap-space", str(cfg.swap_space)]
     args += ["--kv-cache-dtype", cfg.kv_cache_dtype]
     args += ["--tensor-parallel-size", str(cfg.tensor_parallel_size)]
-    args += ["--pipeline-parallel-size", str(cfg.pipeline_parallel_size)]
 
-    if cfg.enable_prefix_caching:
+    if _flag_supported("--pipeline-parallel-size"):
+        args += ["--pipeline-parallel-size", str(cfg.pipeline_parallel_size)]
+
+    if cfg.enable_prefix_caching and _flag_supported("--enable-prefix-caching"):
         args.append("--enable-prefix-caching")
-    if not cfg.enable_chunked_prefill:
+    if not cfg.enable_chunked_prefill and _flag_supported("--disable-chunked-prefill"):
         args.append("--disable-chunked-prefill")
-    if cfg.attention_backend:
+    if cfg.attention_backend and _flag_supported("--attention-backend"):
         args += ["--attention-backend", cfg.attention_backend]
-    if cfg.speculative_model:
+    if cfg.speculative_model and _flag_supported("--speculative-model"):
         args += [
             "--speculative-model",
             cfg.speculative_model,

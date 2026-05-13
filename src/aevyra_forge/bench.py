@@ -228,6 +228,51 @@ async def _benchmark_async(
 # ---------------------------------------------------------------------------
 
 
+def warmup(
+    *,
+    server_url: str,
+    workload: Workload,
+    n_requests: int | None = None,
+    timeout_s: int = 120,
+) -> None:
+    """Send a small subset of the workload to bring vLLM to steady state.
+
+    Ensures every experiment is benchmarked with a warm KV prefix cache and
+    warmed-up CUDA kernels, making comparisons fair regardless of whether
+    vLLM was just restarted or reused from the previous experiment.
+
+    Uses the first ``n_requests`` which share the common prefix (if any) so
+    that the prefix cache is populated before the timed run starts. Errors
+    are silently ignored — this is best-effort.
+
+    ``n_requests`` defaults to 10% of the workload, minimum 3, maximum 20.
+    For prefix-caching workloads the prefix is warm after the first request;
+    the remaining requests warm CUDA kernels and the scheduling pipeline.
+    """
+    if not workload.requests:
+        return
+    if n_requests is None:
+        n_requests = max(3, min(20, len(workload.requests) // 10))
+    warm_requests = workload.requests[:n_requests]
+    warm_wl = Workload(
+        requests=warm_requests,
+        duration_s=workload.duration_s,
+        concurrency=min(workload.concurrency, n_requests),
+    )
+    logger.info("forge │  warmup: %d requests (cache prime + kernel warm)", len(warm_requests))
+    try:
+        benchmark(
+            server_url=server_url,
+            workload=warm_wl,
+            recipe_id="warmup",
+            workload_id="warmup",
+            accuracy_check=False,
+            timeout_s=timeout_s,
+        )
+    except Exception as exc:
+        logger.debug("Warmup failed (non-fatal): %s", exc)
+
+
 def benchmark(
     *,
     server_url: str,
@@ -304,18 +349,36 @@ def benchmark(
 
     t_start = time.monotonic()
 
+    _coro = _benchmark_async(
+        server_url=server_url,
+        workload=workload,
+        model_id=model_id,
+        use_chat=use_chat,
+        concurrency=concurrency,
+        timeout_s=timeout_s,
+    )
+
     try:
-        latencies, ttfts, total_output_tokens, errors = asyncio.run(
-            _benchmark_async(
-                server_url=server_url,
-                workload=workload,
-                model_id=model_id,
-                use_chat=use_chat,
-                concurrency=concurrency,
-                timeout_s=timeout_s,
-            )
-        )
+        # Colab / Jupyter kernels run their own event loop, so asyncio.run()
+        # raises "This event loop is already running". Work around by running
+        # the coroutine in a dedicated background thread that owns its loop.
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+
+        if running_loop is not None and running_loop.is_running():
+            import concurrent.futures
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(asyncio.run, _coro)
+                latencies, ttfts, total_output_tokens, errors = future.result(
+                    timeout=timeout_s + 30
+                )
+        else:
+            latencies, ttfts, total_output_tokens, errors = asyncio.run(_coro)
     except Exception as exc:
+        _coro.close()  # prevent "coroutine never awaited" RuntimeWarning
         elapsed = time.monotonic() - t_start
         return BenchResult(
             throughput_tokens_per_sec=0.0,

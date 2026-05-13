@@ -68,6 +68,7 @@ class ForgeConfig:
     min_improvement_pct: float = 1.0
     convergence_window: int = 5
     layer_escalation: bool = True
+    exploration_interval: int = 4  # reset to global best every N experiments
     dry_run: bool = False
     work_dir: Path = field(default_factory=lambda: Path("./runs/current"))
 
@@ -123,8 +124,13 @@ class Orchestrator:
         self._runner_args: list[str] = []
         current_layer = "config"
 
-        # Build baseline recipe
-        baseline_cfg = config_mod.baseline_config(self.hardware)
+        # Build baseline recipe — pass workload's min context so max_model_len
+        # is never capped below what the requests actually need.
+        baseline_cfg = config_mod.baseline_config(
+            self.hardware,
+            model_name=self.model,
+            min_context_len=self.workload.min_context_tokens(),
+        )
         baseline_recipe = Recipe(
             model=self.model,
             hardware=self.hardware,
@@ -154,8 +160,27 @@ class Orchestrator:
                 if self.cfg.layer_escalation:
                     current_layer = self._should_escalate(history, current_layer)
 
-                # Ask agent for next mutation
+                # Periodic re-exploration: reset to global best every N experiments
+                # so the agent can explore branches it couldn't reach from the
+                # current greedy path.
                 exp_n = len(history)
+                if (
+                    self.cfg.exploration_interval > 0
+                    and exp_n > 0
+                    and exp_n % self.cfg.exploration_interval == 0
+                ):
+                    best_exp = self.store.best()
+                    if best_exp and best_exp.recipe.id != current_recipe.id:
+                        logger.info(
+                            "forge │  ↩ re-exploring from best recipe %s "
+                            "(score=%.1f) — interval=%d",
+                            best_exp.recipe.id,
+                            best_score,
+                            self.cfg.exploration_interval,
+                        )
+                        current_recipe = best_exp.recipe
+
+                # Ask agent for next mutation
                 logger.info(
                     "forge │  experiment %d/%d — asking agent...",
                     exp_n,
@@ -190,6 +215,57 @@ class Orchestrator:
                 )
                 logger.info("forge │  rationale : %s", decision.rationale)
                 logger.info("forge │  mutation  : %s", decision.mutation.get("changes", {}))
+
+                # Reject mutations that exactly match a previous CRASH or FAIL attempt.
+                # Re-ask the agent up to 2 times before logging a dup and moving on,
+                # so a blocked mutation doesn't silently waste an experiment slot.
+                proposed_changes = decision.mutation.get("changes", {})
+                _dup_retries = 0
+                while True:
+                    _already_tried = self._find_duplicate(history, proposed_changes, current_recipe)
+                    if not _already_tried:
+                        break
+                    if _dup_retries >= 2:
+                        logger.warning(
+                            "forge │  agent stuck on duplicate after %d retries — "
+                            "logging dup and moving on",
+                            _dup_retries,
+                        )
+                        exp = Experiment(
+                            id=f"dup-{len(history)}",
+                            recipe=current_recipe,
+                            agent_decision=decision,
+                            score=0.0,
+                            kept=False,
+                        )
+                        self.store.append(exp)
+                        history = self.store.history()
+                        decision = None
+                        break
+                    _dup_retries += 1
+                    logger.warning(
+                        "forge │  duplicate mutation %s (retry %d/2) — re-asking agent",
+                        proposed_changes,
+                        _dup_retries,
+                    )
+                    try:
+                        from aevyra_forge import agent as agent_mod
+
+                        decision = agent_mod.propose_next_experiment(
+                            history=history,
+                            playbook=self.playbook,
+                            current_recipe=current_recipe,
+                            workload=self.workload,
+                            llm=self.llm,
+                        )
+                    except Exception as exc:
+                        logger.warning("forge │  agent retry failed: %s", exc)
+                        decision = None
+                        break
+                    proposed_changes = decision.mutation.get("changes", {}) if decision else {}
+
+                if decision is None or not decision.mutation.get("changes"):
+                    continue
 
                 # Apply mutation
                 try:
@@ -244,6 +320,7 @@ class Orchestrator:
 
                 self.store.append(exp)
                 history = self.store.history()
+                self._print_table(history)
 
         finally:
             self._stop_runner()
@@ -419,7 +496,7 @@ class Orchestrator:
         """
         import time
 
-        from aevyra_forge.bench import benchmark, score as bench_score
+        from aevyra_forge.bench import benchmark, score as bench_score, warmup
 
         t_start = time.time()
         exp = Experiment(
@@ -431,6 +508,8 @@ class Orchestrator:
 
         try:
             runner = self._ensure_runner(recipe)
+            if not self.cfg.dry_run:
+                warmup(server_url=runner.url(), workload=self.workload)
             bench_result = benchmark(
                 server_url=runner.url(),
                 workload=self.workload,
@@ -441,10 +520,39 @@ class Orchestrator:
                 dry_run=self.cfg.dry_run,
             )
         except Exception as exc:
-            logger.error("Runner/bench failed for recipe %s: %s", recipe.id, exc)
-            # Mark the runner as dead so the next experiment forces a fresh start
+            error_str = str(exc)
+            logger.error("Runner/bench failed for recipe %s: %s", recipe.id, error_str)
+            # Stop the failed runner so log file handles and tee thread are cleaned up,
+            # then mark it dead so the next experiment forces a fresh start.
+            old_runner = getattr(self, "_runner", None)
+            if old_runner is not None:
+                try:
+                    old_runner.stop()
+                except Exception:
+                    pass
             self._runner = None
             self._runner_args = []
+
+            # vLLM suggests a safe max_model_len in the OOM message — apply it
+            # so the NEXT experiment starts with a working context length.
+            import re as _re
+
+            _m = _re.search(r"estimated maximum model length is (\d+)", error_str)
+            if _m:
+                suggested = int(_m.group(1))
+                min_ctx = self.workload.min_context_tokens()
+                if suggested >= min_ctx:
+                    logger.info(
+                        "forge │  applying vLLM-suggested max_model_len=%d to current recipe",
+                        suggested,
+                    )
+                    import copy as _copy
+
+                    new_cfg = _copy.deepcopy(recipe.config)
+                    new_cfg.max_model_len = suggested
+                    # Update the running recipe so subsequent experiments inherit it
+                    recipe = _copy.deepcopy(recipe)
+                    recipe.config = new_cfg
             bench_result = BenchResult(
                 throughput_tokens_per_sec=0.0,
                 p50_latency_ms=0.0,
@@ -515,11 +623,16 @@ class Orchestrator:
     def _is_converged(self, history: list[Experiment]) -> bool:
         """True iff the last ``convergence_window`` experiments haven't
         improved the score by ``min_improvement_pct``.
+
+        Rejected (rej-) and duplicate-skipped (dup-) entries are excluded
+        from the window — they don't represent real search attempts and
+        shouldn't cause premature convergence.
         """
-        if len(history) < self.cfg.convergence_window:
+        real = [e for e in history if not e.id.startswith(("rej-", "dup-"))]
+        if len(real) < self.cfg.convergence_window:
             return False
 
-        recent = history[-self.cfg.convergence_window :]
+        recent = real[-self.cfg.convergence_window :]
         # If any experiment in the window was kept, we haven't converged
         if any(e.kept for e in recent):
             return False
@@ -585,6 +698,75 @@ class Orchestrator:
                 return True
 
         return False
+
+    def _find_duplicate(
+        self,
+        history: list[Experiment],
+        proposed_changes: dict,
+        current_recipe: "Recipe",
+    ) -> "Experiment | None":
+        """Return a previous experiment that makes re-running proposed_changes pointless.
+
+        Two levels of blocking:
+
+        1. **CRASH / FAIL anywhere** — a mutation that crashes is bad
+           regardless of the base recipe (OOM, bad flag, etc.).  Block it.
+
+        2. **REVERTED from the same base recipe** — if we already tried
+           max_num_seqs=32 on top of prefix_caching=True and it was worse,
+           trying it again from the same base is a waste.  But if the base
+           recipe has since changed (e.g. prefix_caching was just enabled),
+           the same knob value might behave differently and should be allowed.
+
+        A "same base recipe" match requires that the current recipe's values
+        for the proposed fields are identical to the base recipe at the time
+        of the past experiment.
+        """
+        if not proposed_changes:
+            return None
+
+        for exp in reversed(history):  # most recent first
+            if not exp.agent_decision:
+                continue
+            past_changes = exp.agent_decision.mutation.get("changes", {})
+            if not all(past_changes.get(k) == v for k, v in proposed_changes.items()):
+                continue
+
+            br = exp.bench_result
+
+            # Level 1: always block crash/fail — bad regardless of base recipe
+            if br and br.status in ("CRASH", "FAIL"):
+                return exp
+            if exp.score == 0.0 and not exp.kept:
+                return exp
+
+            # Level 2: block REVERTED only if this mutation was applied on top of
+            # the same base recipe — i.e. the past experiment's parent is the
+            # current recipe. If the base has changed (e.g. a new knob was kept
+            # since then), the same mutation might behave differently.
+            if not exp.kept and br and br.status == "PASS":
+                if exp.recipe.parent_id == current_recipe.id:
+                    return exp
+
+        return None
+
+    def _print_table(self, history: list[Experiment]) -> None:
+        """Print a compact results table to stdout after each experiment."""
+        header = f"{'#':>3}  {'score':>8}  {'tok/s':>8}  {'p99ms':>6}  {'kept':>4}  {'mutation'}"
+        rows = [header, "─" * 70]
+        for i, e in enumerate(history):
+            br = e.bench_result
+            score_s = f"{e.score:.1f}" if e.score is not None else "-"
+            tps_s = f"{br.throughput_tokens_per_sec:.1f}" if br else "-"
+            p99_s = f"{br.p99_latency_ms:.0f}" if br else "-"
+            kept_s = "✓" if e.kept else "✗"
+            if e.agent_decision:
+                changes = e.agent_decision.mutation.get("changes", {})
+                mut_s = ", ".join(f"{k}={v}" for k, v in changes.items())[:40]
+            else:
+                mut_s = "baseline"
+            rows.append(f"{i:>3}  {score_s:>8}  {tps_s:>8}  {p99_s:>6}  {kept_s:>4}  {mut_s}")
+        print("\n" + "\n".join(rows) + "\n")
 
     def _generate_analysis(
         self,
