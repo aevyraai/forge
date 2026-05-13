@@ -1,0 +1,50 @@
+{"prompt": "Explain the difference between supervised and unsupervised learning in machine learning.", "expected_output_tokens": 150}
+{"prompt": "Write a Python function that checks whether a given string is a palindrome.", "expected_output_tokens": 80}
+{"prompt": "Summarize the key principles of transformer architecture introduced in 'Attention is All You Need'.", "expected_output_tokens": 200}
+{"prompt": "What are the main differences between REST and GraphQL APIs? When would you choose one over the other?", "expected_output_tokens": 180}
+{"prompt": "Write a SQL query to find the top 5 customers by total purchase amount from an orders table.", "expected_output_tokens": 60}
+{"prompt": "Explain how gradient descent works and why learning rate matters.", "expected_output_tokens": 160}
+{"prompt": "What is the CAP theorem in distributed systems? Provide a concrete example.", "expected_output_tokens": 170}
+{"prompt": "Write a Python function to flatten a nested list of arbitrary depth.", "expected_output_tokens": 70}
+{"prompt": "Describe the differences between process and thread in operating systems.", "expected_output_tokens": 140}
+{"prompt": "How does HTTPS work? Walk through what happens when a browser connects to https://example.com.", "expected_output_tokens": 200}
+{"prompt": "What is the difference between L1 and L2 regularization in machine learning models?", "expected_output_tokens": 130}
+{"prompt": "Write a bash script that monitors disk usage and sends an alert if it exceeds 80%.", "expected_output_tokens": 90}
+{"prompt": "Explain the concept of eventual consistency in distributed databases.", "expected_output_tokens": 150}
+{"prompt": "What are the SOLID principles in software engineering? Give a brief example of each.", "expected_output_tokens": 250}
+{"prompt": "How does a convolutional neural network (CNN) differ from a fully connected network?", "expected_output_tokens": 160}
+{"prompt": "Write a Python decorator that measures and logs the execution time of a function.", "expected_output_tokens": 80}
+{"prompt": "Explain the difference between optimistic and pessimistic locking in databases.", "expected_output_tokens": 140}
+{"prompt": "What is a bloom filter and when would you use one?", "expected_output_tokens": 130}
+{"prompt": "Summarize the key trade-offs between batch processing and stream processing for data pipelines.", "expected_output_tokens": 170}
+{"prompt": "Write a Python class implementing a least-recently-used (LRU) cache.", "expected_output_tokens": 120}
+{"prompt": "Explain how consistent hashing works and why it is used in distributed systems.", "expected_output_tokens": 160}
+{"prompt": "What are the key differences between PostgreSQL and MongoDB? When would you use each?", "expected_output_tokens": 180}
+{"prompt": "Describe how you would design a rate limiter for a public API.", "expected_output_tokens": 200}
+{"prompt": "What is the difference between a mutex and a semaphore?", "expected_output_tokens": 120}
+{"prompt": "Write a Python function that computes the nth Fibonacci number using memoization.", "expected_output_tokens": 70}
+{"prompt": "Explain the concept of attention mechanism in transformer models.", "expected_output_tokens": 190}
+{"prompt": "How does Kubernetes handle pod scheduling and what factors affect placement decisions?", "expected_output_tokens": 180}
+{"prompt": "What is a circuit breaker pattern in microservices? When should it be used?", "expected_output_tokens": 150}
+{"prompt": "Write a Python context manager that temporarily changes the working directory.", "expected_output_tokens": 70}
+{"prompt": "Explain the differences between vertical and horizontal scaling. What are the limits of each?", "expected_output_tokens": 160}
+{"prompt": "Describe the internals of a hash table including collision resolution strategies.", "expected_output_tokens": 170}
+{"prompt": "What is model quantization in deep learning and what are the trade-offs between INT4, INT8, and BF16?", "expected_output_tokens": 180}
+{"prompt": "How would you design a distributed task queue? What components are needed?", "expected_output_tokens": 200}
+{"prompt": "What is the difference between eager and lazy evaluation? Give examples in Python.", "expected_output_tokens": 130}
+{"prompt": "Explain how the Linux kernel handles virtual memory and page faults.", "expected_output_tokens": 190}
+{"prompt": "Write a Python function to detect a cycle in a linked list.", "expected_output_tokens": 80}
+{"prompt": "What are the key differences between OLTP and OLAP systems?", "expected_output_tokens": 140}
+{"prompt": "Explain how vLLM's paged attention mechanism reduces memory fragmentation compared to traditional KV cache.", "expected_output_tokens": 200}
+{"prompt": "What is the difference between blue-green deployment and canary deployment?", "expected_output_tokens": 140}
+{"prompt": "Describe how you would implement distributed tracing in a microservices architecture.", "expected_output_tokens": 180}
+{"prompt": "What is speculative decoding in LLM inference and how does it improve throughput?", "expected_output_tokens": 170}
+{"prompt": "Write a Python function to merge two sorted arrays in O(n) time.", "expected_output_tokens": 70}
+{"prompt": "Explain the difference between token-level and request-level batching in LLM serving.", "expected_output_tokens": 160}
+{"prompt": "How does prefix caching work in vLLM and what types of workloads benefit most?", "expected_output_tokens": 170}
+{"prompt": "What are the main bottlenecks when serving large language models at high concurrency?", "expected_output_tokens": 180}
+{"prompt": "Explain the trade-offs between tensor parallelism and pipeline parallelism for multi-GPU inference.", "expected_output_tokens": 190}
+{"prompt": "What is chunked prefill in vLLM and why does it help on memory-constrained GPUs?", "expected_output_tokens": 160}
+{"prompt": "Describe how KV cache memory is allocated in a paged attention system.", "expected_output_tokens": 170}
+{"prompt": "What is continuous batching and how does it differ from static batching for LLM inference?", "expected_output_tokens": 160}
+{"prompt": "Explain how AWQ quantization works and why it preserves accuracy better than naive weight rounding.", "expected_output_tokens": 180}
