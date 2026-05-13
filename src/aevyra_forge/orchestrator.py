@@ -222,9 +222,7 @@ class Orchestrator:
                 proposed_changes = decision.mutation.get("changes", {})
                 _dup_retries = 0
                 while True:
-                    _already_tried = self._find_duplicate(
-                        history, proposed_changes, current_recipe
-                    )
+                    _already_tried = self._find_duplicate(history, proposed_changes, current_recipe)
                     if not _already_tried:
                         break
                     if _dup_retries >= 2:
@@ -252,6 +250,7 @@ class Orchestrator:
                     )
                     try:
                         from aevyra_forge import agent as agent_mod
+
                         decision = agent_mod.propose_next_experiment(
                             history=history,
                             playbook=self.playbook,
@@ -537,6 +536,7 @@ class Orchestrator:
             # vLLM suggests a safe max_model_len in the OOM message — apply it
             # so the NEXT experiment starts with a working context length.
             import re as _re
+
             _m = _re.search(r"estimated maximum model length is (\d+)", error_str)
             if _m:
                 suggested = int(_m.group(1))
@@ -547,6 +547,7 @@ class Orchestrator:
                         suggested,
                     )
                     import copy as _copy
+
                     new_cfg = _copy.deepcopy(recipe.config)
                     new_cfg.max_model_len = suggested
                     # Update the running recipe so subsequent experiments inherit it

@@ -109,7 +109,9 @@ def fetch_model_kv_config(model_name: str) -> dict[str, int] | None:
         # Support standard (dense), GQA, and MLA layouts
         n_layers = cfg.get("num_hidden_layers") or cfg.get("n_layer")
         # GQA: num_key_value_heads < num_attention_heads
-        n_kv_heads = cfg.get("num_key_value_heads") or cfg.get("num_attention_heads") or cfg.get("n_head")
+        n_kv_heads = (
+            cfg.get("num_key_value_heads") or cfg.get("num_attention_heads") or cfg.get("n_head")
+        )
         hidden = cfg.get("hidden_size") or cfg.get("d_model")
         n_heads = cfg.get("num_attention_heads") or cfg.get("n_head")
         head_dim = cfg.get("head_dim")
@@ -242,9 +244,9 @@ def _safe_batched_tokens(
     tier = _vram_tier(hardware)
     _is_quant = quant_method.lower() not in ("bf16", "fp16", "fp32", "none", "")
     base = {
-        "small":  [2048, 4096] if _is_quant else [2048],
+        "small": [2048, 4096] if _is_quant else [2048],
         "medium": [2048, 4096, 8192],
-        "large":  [4096, 8192, 16384],
+        "large": [4096, 8192, 16384],
         "xlarge": [8192, 16384, 32768],
     }[tier]
     return base
@@ -289,13 +291,13 @@ def _vram_tier(hardware: HardwareSpec) -> str:
     """
     total = hardware.memory_gb_per_gpu * hardware.count
     if total <= 20:
-        return "small"    # T4 16 GB, V100 16 GB, RTX 3080 10 GB
+        return "small"  # T4 16 GB, V100 16 GB, RTX 3080 10 GB
     elif total <= 50:
-        return "medium"   # A10G 24 GB, RTX 4090 24 GB, A40 48 GB
+        return "medium"  # A10G 24 GB, RTX 4090 24 GB, A40 48 GB
     elif total <= 100:
-        return "large"    # A100 40/80 GB, H100 80 GB, 2×A10G 48 GB
+        return "large"  # A100 40/80 GB, H100 80 GB, 2×A10G 48 GB
     else:
-        return "xlarge"   # MI300X 192 GB, H200, 4×A100, 8×A100
+        return "xlarge"  # MI300X 192 GB, H200, 4×A100, 8×A100
 
 
 # ---------------------------------------------------------------------------
@@ -321,9 +323,9 @@ def search_space(
 
     # Default max_num_seqs ladder by VRAM tier (without model knowledge)
     tier_seqs: dict[str, list[int]] = {
-        "small":  [8, 16, 32],
+        "small": [8, 16, 32],
         "medium": [16, 32, 64, 128],
-        "large":  [32, 64, 128, 256, 512],
+        "large": [32, 64, 128, 256, 512],
         "xlarge": [64, 128, 256, 512, 1024],
     }
     base_seqs = tier_seqs[tier]
@@ -408,8 +410,7 @@ def mutate(recipe: Recipe, mutation: dict[str, Any]) -> Recipe:
     for field_name, value in changes.items():
         if field_name not in current:
             raise ValueError(
-                f"Unknown VLLMConfig field: {field_name!r}. "
-                f"Known fields: {sorted(current.keys())}"
+                f"Unknown VLLMConfig field: {field_name!r}. Known fields: {sorted(current.keys())}"
             )
         if field_name in space and value not in space[field_name]:
             raise ValueError(

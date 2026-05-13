@@ -199,9 +199,17 @@ def propose_next_experiment(
     )
 
     search_space_text = "\n".join(
-        f"  {k}: {v}" for k, v in sorted(space.items())
-        if k in ("max_num_seqs", "max_num_batched_tokens", "block_size",
-                  "gpu_memory_utilization", "kv_cache_dtype", "attention_backend")
+        f"  {k}: {v}"
+        for k, v in sorted(space.items())
+        if k
+        in (
+            "max_num_seqs",
+            "max_num_batched_tokens",
+            "block_size",
+            "gpu_memory_utilization",
+            "kv_cache_dtype",
+            "attention_backend",
+        )
     )
 
     prompt = _AGENT_PROMPT.format(

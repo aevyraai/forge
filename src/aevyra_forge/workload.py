@@ -60,8 +60,7 @@ class Workload:
         if not self.requests:
             return 512
         worst = max(
-            int(len(r.prompt.split()) * 2.0) + r.expected_output_tokens
-            for r in self.requests
+            int(len(r.prompt.split()) * 2.0) + r.expected_output_tokens for r in self.requests
         )
         # Round up to the nearest 512 with 25% headroom
         with_margin = int(worst * 1.25)
