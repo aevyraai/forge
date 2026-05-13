@@ -43,6 +43,7 @@ from aevyra_forge.recipe import (
     Recipe,
     VLLMConfig,
 )
+from aevyra_forge.result import ForgeRun, ForgeStore
 from aevyra_forge.workload import (
     Workload,
     WorkloadRequest,
@@ -69,6 +70,8 @@ __all__ = [
     "Forge",
     "ForgeConfig",
     "ForgeError",
+    "ForgeRun",
+    "ForgeStore",
     "HardwareSpec",
     "KernelOverride",
     "Orchestrator",

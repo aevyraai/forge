@@ -23,7 +23,7 @@ The orchestrator owns:
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -36,7 +36,7 @@ if TYPE_CHECKING:
     from aevyra_forge.agent import AgentDecision
     from aevyra_forge.llm import LLMFn
     from aevyra_forge.playbook import Playbook
-    from aevyra_forge.result import ExperimentStore
+    from aevyra_forge.result import ForgeRun, ForgeStore
     from aevyra_forge.runner import VLLMRunner
 
 
@@ -70,7 +70,6 @@ class ForgeConfig:
     layer_escalation: bool = True
     exploration_interval: int = 4  # reset to global best every N experiments
     dry_run: bool = False
-    work_dir: Path = field(default_factory=lambda: Path("./runs/current"))
 
 
 class Orchestrator:
@@ -84,7 +83,7 @@ class Orchestrator:
         workload: Workload,
         playbook: "Playbook",
         llm: "LLMFn",
-        store: "ExperimentStore",
+        store: "ForgeStore",
         forge_config: ForgeConfig | None = None,
     ) -> None:
         self.model = model
@@ -94,6 +93,7 @@ class Orchestrator:
         self.llm = llm
         self.store = store
         self.cfg = forge_config or ForgeConfig()
+        self._run_handle: ForgeRun | None = None  # active run, set in run()/resume()
 
     def run(self) -> tuple[Recipe, list[Experiment]]:
         """Main loop.
@@ -114,15 +114,34 @@ class Orchestrator:
         experiment with score=0. The agent sees it in history and
         avoids the region.
         """
+        import dataclasses
         import time
 
         from aevyra_forge import config as config_mod
         from aevyra_forge.recipe import Recipe
+        from aevyra_forge.result import ForgeStore
 
         self._run_start = time.time()
         self._runner = None
         self._runner_args: list[str] = []
         current_layer = "config"
+
+        # Create a new numbered run directory via ForgeStore, or use a bare
+        # ForgeRun passed directly (backward compat).
+        if isinstance(self.store, ForgeStore):
+            run_handle = self.store.new_run()
+        else:
+            run_handle = self.store  # type: ignore[assignment]
+        self._run_handle = run_handle
+
+        # Persist run metadata so it can be found on resume.
+        run_handle.save_config(
+            model=self.model,
+            hardware_label=self.hardware.label(),
+            workload_id=self.workload.metadata.get("id", "default"),
+            forge_config_dict=dataclasses.asdict(self.cfg),
+        )
+        logger.info("forge │  run dir: %s", run_handle.path)
 
         # Build baseline recipe — pass workload's min context so max_model_len
         # is never capped below what the requests actually need.
@@ -142,9 +161,9 @@ class Orchestrator:
             logger.info("forge ┌─ experiment 0/%d  [baseline]", self.cfg.max_experiments)
             baseline_exp = self._run_one(baseline_recipe, agent_decision=None)
             baseline_exp.kept = True
-            self.store.append(baseline_exp)
+            run_handle.append(baseline_exp)
 
-            history = self.store.history()
+            history = run_handle.history()
             current_recipe = baseline_recipe
             best_score = baseline_exp.score or 0.0
 
@@ -169,7 +188,7 @@ class Orchestrator:
                     and exp_n > 0
                     and exp_n % self.cfg.exploration_interval == 0
                 ):
-                    best_exp = self.store.best()
+                    best_exp = run_handle.best()
                     if best_exp and best_exp.recipe.id != current_recipe.id:
                         logger.info(
                             "forge │  ↩ re-exploring from best recipe %s "
@@ -238,8 +257,8 @@ class Orchestrator:
                             score=0.0,
                             kept=False,
                         )
-                        self.store.append(exp)
-                        history = self.store.history()
+                        run_handle.append(exp)
+                        history = run_handle.history()
                         decision = None
                         break
                     _dup_retries += 1
@@ -282,8 +301,8 @@ class Orchestrator:
                         score=0.0,
                         kept=False,
                     )
-                    self.store.append(exp)
-                    history = self.store.history()
+                    run_handle.append(exp)
+                    history = run_handle.history()
                     continue
 
                 # Run experiment
@@ -318,14 +337,14 @@ class Orchestrator:
                         exp.llm_tokens,
                     )
 
-                self.store.append(exp)
-                history = self.store.history()
+                run_handle.append(exp)
+                history = run_handle.history()
                 self._print_table(history)
 
         finally:
             self._stop_runner()
 
-        best_exp = self.store.best()
+        best_exp = run_handle.best()
         best_recipe = best_exp.recipe if best_exp else baseline_recipe
         baseline_score = history[0].score or 0.0
         total_gain = 100 * (best_score - baseline_score) / max(baseline_score, 1e-9)
@@ -342,6 +361,14 @@ class Orchestrator:
         logger.info("forge   best recipe gen   : %d  id=%s", best_recipe.generation, best_recipe.id)
         logger.info("forge ══════════════════════════════════════════")
 
+        # Mark run as cleanly completed so it won't appear in find_incomplete_run()
+        run_handle.save_completion(
+            best_score=best_score,
+            n_kept=kept_count,
+            n_total=len(history),
+            wall_time_s=elapsed,
+        )
+
         analysis = self._generate_analysis(history, baseline_score, best_score, elapsed)
         if analysis:
             print("\n" + "─" * 60)
@@ -353,17 +380,35 @@ class Orchestrator:
         return best_recipe, history
 
     def resume(self) -> tuple[Recipe, list[Experiment]]:
-        """Continue from an existing run directory. Re-loads store.history()."""
+        """Continue the most recent interrupted run, or start fresh if none found.
+
+        Finds the latest run directory that has experiments but no
+        ``completed.json`` and picks up from where it left off.  Falls back
+        to :meth:`run` when no incomplete run exists.
+        """
         import time
 
-        history = self.store.history()
+        from aevyra_forge.result import ForgeStore
+
+        # Locate the interrupted run
+        if isinstance(self.store, ForgeStore):
+            run_handle = self.store.find_incomplete_run()
+            if run_handle is None:
+                logger.warning("forge │  no interrupted run found — starting fresh")
+                return self.run()
+        else:
+            run_handle = self.store  # type: ignore[assignment]
+
+        self._run_handle = run_handle
+
+        history = run_handle.history()
         if not history:
-            logger.warning("No existing experiments found in store — starting fresh.")
+            logger.warning("forge │  run dir is empty — starting fresh")
             return self.run()
 
-        best_exp = self.store.best()
+        best_exp = run_handle.best()
         if best_exp is None:
-            logger.warning("No kept experiments found — starting fresh.")
+            logger.warning("forge │  no kept experiments found — starting fresh")
             return self.run()
 
         self._run_start = time.time()
@@ -374,16 +419,23 @@ class Orchestrator:
         current_layer = "config"
 
         logger.info(
-            "Resuming from experiment %s with best_score=%.4f (%d experiments in history)",
-            best_exp.id,
-            best_score,
+            "forge │  resuming run %s — %d experiments, best=%.1f tok/s",
+            run_handle.run_id,
             len(history),
+            best_score,
         )
 
         try:
             while not self._is_converged(history) and not self._budget_exhausted(history):
                 if self.cfg.layer_escalation:
                     current_layer = self._should_escalate(history, current_layer)
+
+                exp_n = len(history)
+                logger.info(
+                    "forge │  experiment %d/%d — asking agent...",
+                    exp_n,
+                    self.cfg.max_experiments,
+                )
 
                 try:
                     from aevyra_forge import agent as agent_mod
@@ -396,19 +448,34 @@ class Orchestrator:
                         llm=self.llm,
                     )
                 except Exception as exc:
-                    logger.warning("Agent call failed: %s — skipping", exc)
+                    logger.warning("forge │  agent call failed: %s — skipping", exc)
                     continue
 
                 if not decision.mutation.get("changes"):
-                    logger.info("Agent returned empty mutation — converged.")
+                    logger.info("forge │  agent returned empty mutation — converged.")
                     break
+
+                proposed_changes = decision.mutation.get("changes", {})
+                _already_tried = self._find_duplicate(history, proposed_changes, current_recipe)
+                if _already_tried:
+                    logger.warning("forge │  skipping duplicate mutation %s", proposed_changes)
+                    continue
 
                 try:
                     from aevyra_forge import config as config_mod
 
                     candidate = config_mod.mutate(current_recipe, decision.mutation)
                 except (ValueError, NotImplementedError) as exc:
-                    logger.warning("Mutation rejected: %s", exc)
+                    logger.warning("forge │  mutation rejected: %s", exc)
+                    exp = Experiment(
+                        id=f"rej-{len(history)}",
+                        recipe=current_recipe,
+                        agent_decision=decision,
+                        score=0.0,
+                        kept=False,
+                    )
+                    run_handle.append(exp)
+                    history = run_handle.history()
                     continue
 
                 exp = self._run_one(candidate, agent_decision=decision)
@@ -421,14 +488,23 @@ class Orchestrator:
                 else:
                     exp.kept = False
 
-                self.store.append(exp)
-                history = self.store.history()
+                run_handle.append(exp)
+                history = run_handle.history()
+                self._print_table(history)
 
         finally:
             self._stop_runner()
 
-        best_exp = self.store.best()
+        best_exp = run_handle.best()
         best_recipe = best_exp.recipe if best_exp else current_recipe
+        elapsed = time.time() - self._run_start
+        kept_count = sum(1 for e in history if e.kept)
+        run_handle.save_completion(
+            best_score=best_score,
+            n_kept=kept_count,
+            n_total=len(history),
+            wall_time_s=elapsed,
+        )
         return best_recipe, history
 
     def _ensure_runner(self, recipe: Recipe) -> "VLLMRunner":
@@ -461,9 +537,10 @@ class Orchestrator:
                 runner.stop()
             else:
                 logger.info("forge │  vLLM starting")
+            run_dir = self._run_handle.path if self._run_handle else Path(".")
             runner = VLLMRunner(
                 recipe,
-                self.cfg.work_dir,
+                run_dir,
                 dry_run=self.cfg.dry_run,
             )
             runner.start()
