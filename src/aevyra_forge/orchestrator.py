@@ -725,10 +725,6 @@ class Orchestrator:
         if not proposed_changes:
             return None
 
-        import dataclasses as _dc
-
-        current_cfg = _dc.asdict(current_recipe.config)
-
         for exp in reversed(history):  # most recent first
             if not exp.agent_decision:
                 continue
@@ -744,25 +740,11 @@ class Orchestrator:
             if exp.score == 0.0 and not exp.kept:
                 return exp
 
-            # Level 2: block REVERTED only if the base recipe is the same
-            # i.e. the fields being mutated had the same values in the current
-            # recipe as they did when this past experiment was run
+            # Level 2: block REVERTED only if this mutation was applied on top of
+            # the same base recipe — i.e. the past experiment's parent is the
+            # current recipe. If the base has changed (e.g. a new knob was kept
+            # since then), the same mutation might behave differently.
             if not exp.kept and br and br.status == "PASS":
-                past_base_cfg = _dc.asdict(exp.recipe.config)
-                # The base values for the proposed fields = past recipe MINUS the changes
-                # (the past recipe IS the result of the mutation, so un-apply it)
-                same_base = all(
-                    past_base_cfg.get(k) == current_cfg.get(k)
-                    for k in proposed_changes
-                    if k not in past_changes  # fields not changed = base values
-                ) and all(
-                    # For the changed fields, the base value was current_cfg[k] == what
-                    # it was BEFORE the past mutation — check via parent recipe if available
-                    True  # conservative: only block if the exact same mutation on same parent
-                    for k in proposed_changes
-                )
-                # Simpler and more robust: check if the current recipe's id matches
-                # the parent of the past experiment
                 if exp.recipe.parent_id == current_recipe.id:
                     return exp
 
