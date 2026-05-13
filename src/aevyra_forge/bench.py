@@ -232,7 +232,7 @@ def warmup(
     *,
     server_url: str,
     workload: Workload,
-    n_requests: int = 10,
+    n_requests: int | None = None,
     timeout_s: int = 120,
 ) -> None:
     """Send a small subset of the workload to bring vLLM to steady state.
@@ -244,9 +244,15 @@ def warmup(
     Uses the first ``n_requests`` which share the common prefix (if any) so
     that the prefix cache is populated before the timed run starts. Errors
     are silently ignored — this is best-effort.
+
+    ``n_requests`` defaults to 10% of the workload, minimum 3, maximum 20.
+    For prefix-caching workloads the prefix is warm after the first request;
+    the remaining requests warm CUDA kernels and the scheduling pipeline.
     """
     if not workload.requests:
         return
+    if n_requests is None:
+        n_requests = max(3, min(20, len(workload.requests) // 10))
     warm_requests = workload.requests[:n_requests]
     warm_wl = Workload(
         requests=warm_requests,
