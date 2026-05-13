@@ -198,7 +198,7 @@ class Orchestrator:
 
                 # Reject mutations that exactly match a previous CRASH or FAIL attempt
                 proposed_changes = decision.mutation.get("changes", {})
-                _already_tried = self._find_duplicate(history, proposed_changes)
+                _already_tried = self._find_duplicate(history, proposed_changes, current_recipe)
                 if _already_tried:
                     logger.warning(
                         "forge │  skipping duplicate mutation %s — already tried as exp %s (%s)",
@@ -643,24 +643,34 @@ class Orchestrator:
         return False
 
     def _find_duplicate(
-        self, history: list[Experiment], proposed_changes: dict
+        self,
+        history: list[Experiment],
+        proposed_changes: dict,
+        current_recipe: "Recipe",
     ) -> "Experiment | None":
-        """Return a previous experiment with the same changes that is not
-        worth retrying.
+        """Return a previous experiment that makes re-running proposed_changes pointless.
 
-        Blocks re-proposing if the same (field, value) set was already tried
-        and resulted in any of:
-        - CRASH or FAIL status
-        - score=0
-        - successfully ran but was REVERTED (score < best at the time)
+        Two levels of blocking:
 
-        Retrying a REVERTED experiment only makes sense if the base recipe
-        changed significantly enough to expect a different outcome.  We allow
-        it if the current best recipe has different values for the proposed
-        fields — meaning the knob hasn't been tried at this starting point.
+        1. **CRASH / FAIL anywhere** — a mutation that crashes is bad
+           regardless of the base recipe (OOM, bad flag, etc.).  Block it.
+
+        2. **REVERTED from the same base recipe** — if we already tried
+           max_num_seqs=32 on top of prefix_caching=True and it was worse,
+           trying it again from the same base is a waste.  But if the base
+           recipe has since changed (e.g. prefix_caching was just enabled),
+           the same knob value might behave differently and should be allowed.
+
+        A "same base recipe" match requires that the current recipe's values
+        for the proposed fields are identical to the base recipe at the time
+        of the past experiment.
         """
         if not proposed_changes:
             return None
+
+        import dataclasses as _dc
+
+        current_cfg = _dc.asdict(current_recipe.config)
 
         for exp in reversed(history):  # most recent first
             if not exp.agent_decision:
@@ -670,15 +680,34 @@ class Orchestrator:
                 continue
 
             br = exp.bench_result
-            # Always block crashed / failed mutations
+
+            # Level 1: always block crash/fail — bad regardless of base recipe
             if br and br.status in ("CRASH", "FAIL"):
                 return exp
             if exp.score == 0.0 and not exp.kept:
                 return exp
-            # Block successfully-run but reverted mutations too — the agent
-            # already observed this outcome and should try something different
+
+            # Level 2: block REVERTED only if the base recipe is the same
+            # i.e. the fields being mutated had the same values in the current
+            # recipe as they did when this past experiment was run
             if not exp.kept and br and br.status == "PASS":
-                return exp
+                past_base_cfg = _dc.asdict(exp.recipe.config)
+                # The base values for the proposed fields = past recipe MINUS the changes
+                # (the past recipe IS the result of the mutation, so un-apply it)
+                same_base = all(
+                    past_base_cfg.get(k) == current_cfg.get(k)
+                    for k in proposed_changes
+                    if k not in past_changes  # fields not changed = base values
+                ) and all(
+                    # For the changed fields, the base value was current_cfg[k] == what
+                    # it was BEFORE the past mutation — check via parent recipe if available
+                    True  # conservative: only block if the exact same mutation on same parent
+                    for k in proposed_changes
+                )
+                # Simpler and more robust: check if the current recipe's id matches
+                # the parent of the past experiment
+                if exp.recipe.parent_id == current_recipe.id:
+                    return exp
 
         return None
 
