@@ -63,16 +63,11 @@ def main() -> None:
             "-H",
             help="Hardware spec: vendor/gpu_type[xN] e.g. nvidia/H100x8, amd/MI300X",
         ),
-        workload_jsonl: Optional[Path] = typer.Option(
-            None,
+        workload_jsonl: Path = typer.Option(
+            ...,
             "--workload",
             "-w",
             help="Path to workload JSONL (prompt + expected_output_tokens per line)",
-        ),
-        workload_synthetic: bool = typer.Option(
-            False,
-            "--workload-synthetic",
-            help="Generate a synthetic workload instead of loading one",
         ),
         playbook: Optional[Path] = typer.Option(
             None, "--playbook", help="Path to playbook markdown. Defaults to built-in playbook."
@@ -101,7 +96,6 @@ def main() -> None:
             model=model,
             hardware_str=hardware,
             workload_jsonl=workload_jsonl,
-            workload_synthetic=workload_synthetic,
             playbook_path=playbook,
             llm_provider=llm_provider,
             max_experiments=max_experiments,
@@ -252,8 +246,7 @@ def _run_tune(
     *,
     model: str,
     hardware_str: str,
-    workload_jsonl: "Path | None",
-    workload_synthetic: bool,
+    workload_jsonl: "Path",
     playbook_path: "Path | None",
     llm_provider: str,
     max_experiments: int,
@@ -270,23 +263,14 @@ def _run_tune(
     from aevyra_forge.orchestrator import ForgeConfig, Orchestrator
     from aevyra_forge.playbook import load_playbook
     from aevyra_forge.result import ExperimentStore
-    from aevyra_forge.workload import workload_from_jsonl, workload_synthetic as make_synthetic
+    from aevyra_forge.workload import workload_from_jsonl
 
     hardware = _parse_hardware(hardware_str)
     actual_run_dir = _make_run_dir(run_dir)
     actual_run_dir.mkdir(parents=True, exist_ok=True)
 
     # Workload
-    if workload_jsonl is not None:
-        workload = workload_from_jsonl(workload_jsonl)
-    elif workload_synthetic:
-        workload = make_synthetic()
-    else:
-        logging.getLogger(__name__).warning(
-            "No workload provided. Using synthetic workload. "
-            "For production runs, pass --workload <path.jsonl>"
-        )
-        workload = make_synthetic()
+    workload = workload_from_jsonl(workload_jsonl)
 
     # Playbook
     pb_path = playbook_path or _default_playbook_path()
