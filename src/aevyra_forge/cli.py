@@ -262,12 +262,10 @@ def _run_tune(
     from aevyra_forge.llm import resolve_llm
     from aevyra_forge.orchestrator import ForgeConfig, Orchestrator
     from aevyra_forge.playbook import load_playbook
-    from aevyra_forge.result import ExperimentStore
+    from aevyra_forge.result import ForgeStore
     from aevyra_forge.workload import workload_from_jsonl
 
     hardware = _parse_hardware(hardware_str)
-    actual_run_dir = _make_run_dir(run_dir)
-    actual_run_dir.mkdir(parents=True, exist_ok=True)
 
     # Workload
     workload = workload_from_jsonl(workload_jsonl)
@@ -285,25 +283,7 @@ def _run_tune(
         playbook = load_playbook(pb_path)
 
     llm = resolve_llm(llm_provider)
-    store = ExperimentStore(actual_run_dir)
-
-    # Save run config
-    config_path = actual_run_dir / "config.json"
-    config_path.write_text(
-        json.dumps(
-            {
-                "model": model,
-                "hardware": hardware_str,
-                "workload": str(workload_jsonl) if workload_jsonl else "synthetic",
-                "llm": llm_provider,
-                "max_experiments": max_experiments,
-                "max_hours": max_hours,
-                "accuracy_floor": accuracy_floor,
-                "dry_run": dry_run,
-            },
-            indent=2,
-        )
-    )
+    store = ForgeStore(run_dir or ".forge")
 
     forge_config = ForgeConfig(
         max_experiments=max_experiments,
@@ -312,7 +292,6 @@ def _run_tune(
         accuracy_floor=accuracy_floor,
         min_improvement_pct=min_improvement_pct,
         dry_run=dry_run,
-        work_dir=actual_run_dir,
     )
 
     orchestrator = Orchestrator(
@@ -325,37 +304,32 @@ def _run_tune(
         forge_config=forge_config,
     )
 
-    print(f"\n🔨 Forge starting — run dir: {actual_run_dir}\n")
     best_recipe, history = orchestrator.run()
-
-    best_path = actual_run_dir / "best_recipe.yaml"
-    print(f"\n✓ Done. {len(history)} experiments. Best recipe → {best_path}\n")
+    print(f"\n✓ Done — {len(history)} experiments\n")
     print(best_recipe.to_yaml())
 
 
 def _run_resume(*, run_dir: Path, llm_provider: str) -> None:
-    import json
-
     from aevyra_forge.llm import resolve_llm
     from aevyra_forge.orchestrator import ForgeConfig, Orchestrator
     from aevyra_forge.playbook import load_playbook
-    from aevyra_forge.result import ExperimentStore
-    from aevyra_forge.workload import workload_synthetic as make_synthetic
+    from aevyra_forge.result import ForgeStore
 
-    config_path = run_dir / "config.json"
-    if not config_path.exists():
-        print(f"✗ No config.json in {run_dir}", file=sys.stderr)
+    store = ForgeStore(run_dir or ".forge")
+    incomplete = store.find_incomplete_run()
+    if incomplete is None:
+        print("✗ No interrupted run found to resume.", file=sys.stderr)
         sys.exit(1)
 
-    cfg = json.loads(config_path.read_text())
+    cfg = incomplete.config() or {}
     hardware = _parse_hardware(cfg["hardware"])
 
     workload_path = cfg.get("workload")
-    if workload_path and workload_path != "synthetic":
+    if workload_path:
         from aevyra_forge.workload import workload_from_jsonl
-
         workload = workload_from_jsonl(Path(workload_path))
     else:
+        from aevyra_forge.workload import workload_synthetic as make_synthetic
         workload = make_synthetic()
 
     pb_path = _default_playbook_path()
@@ -363,18 +337,16 @@ def _run_resume(*, run_dir: Path, llm_provider: str) -> None:
         playbook = load_playbook(pb_path)
     else:
         from aevyra_forge.playbook import Playbook
-
         playbook = Playbook(raw_markdown="")
 
     llm = resolve_llm(llm_provider)
-    store = ExperimentStore(run_dir)
 
+    forge_cfg = cfg.get("forge_config", {})
     forge_config = ForgeConfig(
-        max_experiments=cfg.get("max_experiments", 50),
-        max_wall_clock_hours=cfg.get("max_hours", 12.0),
-        accuracy_floor=cfg.get("accuracy_floor", 0.99),
-        dry_run=cfg.get("dry_run", False),
-        work_dir=run_dir,
+        max_experiments=forge_cfg.get("max_experiments", 50),
+        max_wall_clock_hours=forge_cfg.get("max_wall_clock_hours", 12.0),
+        accuracy_floor=forge_cfg.get("accuracy_floor", 0.99),
+        dry_run=forge_cfg.get("dry_run", False),
     )
 
     orchestrator = Orchestrator(
@@ -387,23 +359,27 @@ def _run_resume(*, run_dir: Path, llm_provider: str) -> None:
         forge_config=forge_config,
     )
 
-    print(f"\n🔨 Forge resuming — run dir: {run_dir}\n")
     best_recipe, history = orchestrator.resume()
-    print(f"\n✓ Done. {len(history)} total experiments.\n")
+    print(f"\n✓ Done — {len(history)} total experiments\n")
     print(best_recipe.to_yaml())
 
 
 def _run_report(*, run_dir: Path) -> None:
-    from aevyra_forge.result import ExperimentStore
+    from aevyra_forge.result import ForgeStore
 
-    store = ExperimentStore(run_dir)
-    history = store.history()
-    if not history:
-        print(f"No experiments found in {run_dir}")
+    store = ForgeStore(run_dir or ".forge")
+    run = store.latest_run()
+    if run is None:
+        print(f"No runs found in {run_dir or '.forge'}")
         return
 
-    best = store.best()
-    print(f"\n=== Forge Report: {run_dir} ===\n")
+    history = run.history()
+    if not history:
+        print(f"No experiments found in {run.path}")
+        return
+
+    best = run.best()
+    print(f"\n=== Forge Report: {run.path} ===\n")
     print(f"Total experiments: {len(history)}")
     if best:
         print(f"Best score:        {best.score:.4f}")
@@ -414,7 +390,7 @@ def _run_report(*, run_dir: Path) -> None:
             print(f"Throughput:        {br.throughput_tokens_per_sec:.1f} tok/s")
             print(f"P99 latency:       {br.p99_latency_ms:.0f} ms")
     print()
-    print(store.render_tsv())
+    print(run.render_tsv())
 
 
 if __name__ == "__main__":
