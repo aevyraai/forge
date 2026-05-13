@@ -57,11 +57,11 @@ def main() -> None:
     @app.command()
     def tune(
         model: str = typer.Option(..., "--model", "-m", help="HuggingFace model ID or local path"),
-        hardware: str = typer.Option(
-            ...,
-            "--hardware",
-            "-H",
-            help="Hardware spec: vendor/gpu_type[xN] e.g. nvidia/H100x8, amd/MI300X",
+        device: str = typer.Option(
+            "cuda",
+            "--device",
+            "-d",
+            help="Device backend: cuda (NVIDIA), rocm (AMD), or cpu (dry-run only).",
         ),
         workload_jsonl: Path = typer.Option(
             ...,
@@ -94,7 +94,7 @@ def main() -> None:
         _setup_logging(verbose)
         _run_tune(
             model=model,
-            hardware_str=hardware,
+            device=device,
             workload_jsonl=workload_jsonl,
             playbook_path=playbook,
             llm_provider=llm_provider,
@@ -182,50 +182,78 @@ def _setup_logging(verbose: bool) -> None:
     )
 
 
-def _parse_hardware(hardware_str: str):
-    """Parse 'nvidia/H100x8' or 'amd/MI300X' into HardwareSpec."""
+def _detect_hardware(device: str):
+    """Auto-detect GPU type, count, and VRAM from the device backend.
+
+    Args:
+        device: One of ``cuda``, ``rocm``, or ``cpu``.
+
+    Returns:
+        A :class:`~aevyra_forge.recipe.HardwareSpec` populated from
+        ``nvidia-smi`` (cuda), ``rocm-smi`` (rocm), or a CPU placeholder.
+    """
+    import subprocess
     from aevyra_forge.recipe import HardwareSpec
 
-    parts = hardware_str.split("/", 1)
-    if len(parts) != 2:
-        raise ValueError(
-            f"Hardware must be vendor/gpu_type[xN], got: {hardware_str!r}. "
-            "Examples: nvidia/H100x8, amd/MI300X, nvidia/A100"
-        )
-    vendor, gpu_spec = parts
-    count = 1
-    if "x" in gpu_spec:
-        gpu_type, count_str = gpu_spec.rsplit("x", 1)
-        try:
-            count = int(count_str)
-        except ValueError:
-            gpu_type = gpu_spec
-    else:
-        gpu_type = gpu_spec
+    log = logging.getLogger(__name__)
+    device = device.lower().strip()
 
-    # Infer VRAM from GPU type
-    mem_map = {
-        "H100": 80,
-        "H200": 141,
-        "B100": 192,
-        "B200": 192,
-        "A100": 80,
-        "A6000": 48,
-        "A10": 24,
-        "T4": 16,
-        "MI300X": 192,
-        "MI250X": 128,
-    }
-    memory_gb = next(
-        (v for k, v in mem_map.items() if k.upper() in gpu_type.upper()),
-        24,
-    )
-    return HardwareSpec(
-        vendor=vendor.lower(),
-        gpu_type=gpu_type,
-        count=count,
-        memory_gb_per_gpu=memory_gb,
-    )
+    if device == "cpu":
+        log.info("Device: cpu — no GPU detected; dry-run mode recommended.")
+        return HardwareSpec(vendor="cpu", gpu_type="cpu", count=1, memory_gb_per_gpu=0)
+
+    if device == "cuda":
+        try:
+            # Query name + memory for every GPU in one call
+            result = subprocess.run(
+                ["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(result.stderr.strip())
+            lines = [l.strip() for l in result.stdout.strip().splitlines() if l.strip()]
+            if not lines:
+                raise RuntimeError("nvidia-smi returned no GPUs")
+            # Each line: "Tesla T4, 15360"
+            names, mibs = zip(*(l.split(",", 1) for l in lines))
+            gpu_type = names[0].strip()
+            memory_gb = round(int(mibs[0].strip()) / 1024)
+            count = len(lines)
+            log.info("Detected %d × %s with %d GB VRAM each", count, gpu_type, memory_gb)
+            return HardwareSpec(vendor="nvidia", gpu_type=gpu_type, count=count, memory_gb_per_gpu=memory_gb)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Could not detect NVIDIA GPU (--device cuda): {exc}. "
+                "Is nvidia-smi available? Try --device rocm or --device cpu."
+            ) from exc
+
+    if device == "rocm":
+        try:
+            result = subprocess.run(
+                ["rocm-smi", "--showproductname", "--showmeminfo", "vram", "--json"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(result.stderr.strip())
+            import json as _json
+            data = _json.loads(result.stdout)
+            cards = {k: v for k, v in data.items() if k.startswith("card")}
+            if not cards:
+                raise RuntimeError("rocm-smi returned no cards")
+            first = next(iter(cards.values()))
+            gpu_type = first.get("Card series", first.get("Card model", "AMD GPU")).strip()
+            bytes_per_gpu = int(first.get("VRAM Total Memory (B)", 0))
+            memory_gb = round(bytes_per_gpu / (1024 ** 3))
+            count = len(cards)
+            log.info("Detected %d × %s with %d GB VRAM each", count, gpu_type, memory_gb)
+            return HardwareSpec(vendor="amd", gpu_type=gpu_type, count=count, memory_gb_per_gpu=memory_gb)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Could not detect AMD GPU (--device rocm): {exc}. "
+                "Is rocm-smi available? Try --device cuda or --device cpu."
+            ) from exc
+
+    raise ValueError(f"Unknown device {device!r}. Choose: cuda, rocm, cpu.")
 
 
 def _default_playbook_path() -> Path:
@@ -245,7 +273,7 @@ def _make_run_dir(run_dir: "Path | None") -> Path:
 def _run_tune(
     *,
     model: str,
-    hardware_str: str,
+    device: str,
     workload_jsonl: "Path",
     playbook_path: "Path | None",
     llm_provider: str,
@@ -265,7 +293,7 @@ def _run_tune(
     from aevyra_forge.result import ForgeStore
     from aevyra_forge.workload import workload_from_jsonl
 
-    hardware = _parse_hardware(hardware_str)
+    hardware = _detect_hardware(device)
 
     # Workload
     workload = workload_from_jsonl(workload_jsonl)
@@ -322,7 +350,10 @@ def _run_resume(*, run_dir: Path, llm_provider: str) -> None:
         sys.exit(1)
 
     cfg = incomplete.config() or {}
-    hardware = _parse_hardware(cfg["hardware"])
+    # Re-detect hardware from the same machine — vendor stored in config label
+    _label = cfg.get("hardware", "")
+    _device = "rocm" if "amd" in _label.lower() else ("cpu" if "cpu" in _label.lower() else "cuda")
+    hardware = _detect_hardware(_device)
 
     workload_path = cfg.get("workload")
     if workload_path:
