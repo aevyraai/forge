@@ -70,6 +70,7 @@ class ForgeConfig:
     layer_escalation: bool = True
     exploration_interval: int = 4  # reset to global best every N experiments
     dry_run: bool = False
+    vllm_startup_timeout_s: int = 600  # 10 min — first start includes weight download
 
 
 class Orchestrator:
@@ -541,6 +542,7 @@ class Orchestrator:
             runner = VLLMRunner(
                 recipe,
                 run_dir,
+                startup_timeout_s=self.cfg.vllm_startup_timeout_s,
                 dry_run=self.cfg.dry_run,
             )
             runner.start()
