@@ -622,11 +622,16 @@ class Orchestrator:
     def _is_converged(self, history: list[Experiment]) -> bool:
         """True iff the last ``convergence_window`` experiments haven't
         improved the score by ``min_improvement_pct``.
+
+        Rejected (rej-) and duplicate-skipped (dup-) entries are excluded
+        from the window — they don't represent real search attempts and
+        shouldn't cause premature convergence.
         """
-        if len(history) < self.cfg.convergence_window:
+        real = [e for e in history if not e.id.startswith(("rej-", "dup-"))]
+        if len(real) < self.cfg.convergence_window:
             return False
 
-        recent = history[-self.cfg.convergence_window :]
+        recent = real[-self.cfg.convergence_window :]
         # If any experiment in the window was kept, we haven't converged
         if any(e.kept for e in recent):
             return False
