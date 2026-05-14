@@ -43,11 +43,9 @@ jobs:
   # ---------------------------------------------------------------------------
   # The notebooks are the first thing every evaluator runs. CI must catch
   # bitrot before users do. See notebooks/README.md for what runs here.
-  # Enable once notebooks land.
   notebooks:
     name: Notebooks (smoke)
     runs-on: ubuntu-latest
-    if: false   # TODO: enable when notebooks/forge_quickstart.ipynb exists
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
