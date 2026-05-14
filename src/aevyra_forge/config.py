@@ -103,7 +103,7 @@ def fetch_model_kv_config(model_name: str) -> dict[str, int] | None:
             return None  # local path — can't fetch from HF
 
         url = f"https://huggingface.co/{repo}/resolve/main/config.json"
-        with urllib.request.urlopen(url, timeout=5) as resp:  # noqa: S310
+        with urllib.request.urlopen(url, timeout=5) as resp:  # noqa: S310  # nosec B310
             cfg = json.loads(resp.read().decode())
 
         # Support standard (dense), GQA, and MLA layouts
