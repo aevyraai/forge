@@ -8,13 +8,12 @@ User-facing documentation in `.mdx`. Pulled by the aevyra.ai docs site
 - `quickstart.mdx` — `pip install` → first tuned recipe in 15 min
 - `concepts/recipe.mdx` — the artifact (VLLMConfig, layers, lineage)
 - `concepts/playbook.mdx` — the agent's instruction manual
+- `tutorial-colab-quickstart.mdx` — dry-run and real-run walkthrough with logs
 
 ## Planned
 
 - `introduction.mdx` — what Forge is, where it fits in the Aevyra stack
-- `tutorial-colab-quickstart.mdx` — walk through the Colab notebook
-- `tutorial-amd-mi300x.mdx` — AMD-specific walkthrough
-- `tutorial-byo-workload.mdx` — bring your own trace
+- `tutorial-amd-mi300x.mdx` — AMD-specific walkthrough (blocked: no MI300X access yet)
 - `concepts/orchestrator.mdx` — Amdahl scheduling, budget, convergence
 - `api/recipe.mdx` — Recipe / VLLMConfig / QuantRecipe reference
 - `api/orchestrator.mdx` — Orchestrator / ForgeConfig reference

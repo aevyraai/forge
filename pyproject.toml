@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aevyra-forge"
-version = "0.0.1"
+version = "0.1.0"
 description = "Autonomous overnight optimizer for LLM inference deployments — tune vLLM config, quantization, and kernels jointly against your real workload."
 readme = "README.md"
 license = "Apache-2.0"
