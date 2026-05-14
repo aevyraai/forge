@@ -1,0 +1,45 @@
+name: Publish to PyPI
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Publish target"
+        required: true
+        default: "testpypi"
+        type: choice
+        options:
+          - testpypi
+          - pypi
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.target }}
+    permissions:
+      id-token: write  # required for OIDC trusted publishing
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - run: pip install build
+
+      - run: python -m build
+
+      - name: Publish to TestPyPI
+        if: github.event.inputs.target == 'testpypi'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+
+      - name: Publish to PyPI
+        if: github.event.inputs.target == 'pypi'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        # OIDC trusted publishing — no API token needed.
+        # Setup: pypi.org → Publishing → Add pending publisher
+        #   Owner: aevyraai  Repo: forge  Workflow: publish.yml  Environment: pypi
+        # Same for test.pypi.org with environment: testpypi

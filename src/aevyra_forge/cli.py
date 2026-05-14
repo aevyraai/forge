@@ -145,9 +145,30 @@ def main() -> None:
     @app.command()
     def report(
         run_dir: Path = typer.Argument(..., help="Run directory to report on"),
+        fmt: str = typer.Option(
+            "tsv",
+            "--format",
+            "-f",
+            help="Output format: tsv (default, human-readable) or json (machine-readable).",
+        ),
     ) -> None:
-        """Print a human-readable summary of a completed run."""
-        _run_report(run_dir=run_dir)
+        """Print a summary of a completed run."""
+        _run_report(run_dir=run_dir, fmt=fmt)
+
+    # ------------------------------------------------------------------
+    # forge doctor
+    # ------------------------------------------------------------------
+    @app.command()
+    def doctor(
+        device: str = typer.Option(
+            "cuda",
+            "--device",
+            "-d",
+            help="Device backend to check: cuda, rocm, or cpu.",
+        ),
+    ) -> None:
+        """Run pre-flight checks: GPU, vLLM, API keys, and workload tooling."""
+        _run_doctor(device=device)
 
     # ------------------------------------------------------------------
     # forge playbook
@@ -348,6 +369,13 @@ def _run_tune(
         dry_run=dry_run,
     )
 
+    if dry_run:
+        print(
+            "\n⚠  DRY-RUN MODE — vLLM is not started and bench results are synthetic.\n"
+            "   Scores reflect a simulated benchmark, not real GPU performance.\n"
+            "   Re-run without --dry-run on a GPU host for production results.\n"
+        )
+
     orchestrator = Orchestrator(
         model=model,
         hardware=hardware,
@@ -431,7 +459,9 @@ def _run_resume(*, run_dir: "Path | None") -> None:
     print(best_recipe.to_yaml())
 
 
-def _run_report(*, run_dir: Path) -> None:
+def _run_report(*, run_dir: Path, fmt: str = "tsv") -> None:
+    import json as _json
+
     from aevyra_forge.result import ForgeStore
 
     store = ForgeStore(run_dir or ".forge")
@@ -445,6 +475,27 @@ def _run_report(*, run_dir: Path) -> None:
         print(f"No experiments found in {run.path}")
         return
 
+    if fmt == "json":
+        # Machine-readable: same schema as experiments.json written during the run
+        best = run.best()
+        payload = {
+            "run_dir": str(run.path),
+            "total_experiments": len(history),
+            "best_id": best.id if best else None,
+            "best_score": best.score if best else None,
+            "best_generation": best.recipe.generation if best else None,
+            "best_throughput_tokens_per_sec": (
+                best.bench_result.throughput_tokens_per_sec if best and best.bench_result else None
+            ),
+            "best_p99_latency_ms": (
+                best.bench_result.p99_latency_ms if best and best.bench_result else None
+            ),
+            "experiments": run._render_json_table(),
+        }
+        print(_json.dumps(payload, indent=2, default=str))
+        return
+
+    # Default: human-readable TSV
     best = run.best()
     print(f"\n=== Forge Report: {run.path} ===\n")
     print(f"Total experiments: {len(history)}")
@@ -458,6 +509,117 @@ def _run_report(*, run_dir: Path) -> None:
             print(f"P99 latency:       {br.p99_latency_ms:.0f} ms")
     print()
     print(run.render_tsv())
+
+
+def _run_doctor(*, device: str) -> None:
+    """Pre-flight checks: GPU, vLLM, API keys, workload tooling."""
+    import importlib
+    import os
+    import subprocess
+
+    ok = True
+
+    def _check(label: str, passed: bool, detail: str = "") -> None:
+        nonlocal ok
+        icon = "✓" if passed else "✗"
+        line = f"  {icon}  {label}"
+        if detail:
+            line += f"  ({detail})"
+        print(line)
+        if not passed:
+            ok = False
+
+    print("\naevyra-forge doctor\n" + "─" * 40)
+
+    # --- vLLM ---
+    vllm_spec = importlib.util.find_spec("vllm")
+    if vllm_spec is not None:
+        try:
+            import vllm as _vllm
+
+            _check("vLLM installed", True, f"v{_vllm.__version__}")
+        except Exception as exc:  # noqa: BLE001
+            _check("vLLM installed", False, str(exc))
+    else:
+        _check(
+            "vLLM installed",
+            False,
+            "not found — run: pip install vllm  (on the GPU host)",
+        )
+
+    # --- GPU ---
+    device = device.lower().strip()
+    if device == "cpu":
+        _check("GPU", True, "cpu device selected — GPU not required")
+    elif device == "cuda":
+        try:
+            r = subprocess.run(
+                ["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader,nounits"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if r.returncode == 0 and r.stdout.strip():
+                lines = [line.strip() for line in r.stdout.strip().splitlines() if line.strip()]
+                gpus = "; ".join(lines[:2])
+                _check("NVIDIA GPU (nvidia-smi)", True, gpus)
+            else:
+                _check("NVIDIA GPU (nvidia-smi)", False, r.stderr.strip() or "no output")
+        except FileNotFoundError:
+            _check("NVIDIA GPU (nvidia-smi)", False, "nvidia-smi not found")
+        except Exception as exc:  # noqa: BLE001
+            _check("NVIDIA GPU (nvidia-smi)", False, str(exc))
+    elif device == "rocm":
+        try:
+            r = subprocess.run(
+                ["rocm-smi", "--showproductname", "--json"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            _check(
+                "AMD GPU (rocm-smi)",
+                r.returncode == 0,
+                "found" if r.returncode == 0 else r.stderr.strip(),
+            )
+        except FileNotFoundError:
+            _check("AMD GPU (rocm-smi)", False, "rocm-smi not found")
+        except Exception as exc:  # noqa: BLE001
+            _check("AMD GPU (rocm-smi)", False, str(exc))
+
+    # --- API keys ---
+    providers = {
+        "ANTHROPIC_API_KEY": "Anthropic",  # pragma: allowlist secret
+        "OPENAI_API_KEY": "OpenAI",  # pragma: allowlist secret
+        "OPENROUTER_API_KEY": "OpenRouter",  # pragma: allowlist secret
+        "TOGETHER_API_KEY": "Together AI",  # pragma: allowlist secret
+        "GROQ_API_KEY": "Groq",  # pragma: allowlist secret
+    }
+    found_keys = [name for name in providers if os.environ.get(name)]
+    if found_keys:
+        _check(
+            "LLM API key",
+            True,
+            " + ".join(providers[k] for k in found_keys),
+        )
+    else:
+        _check(
+            "LLM API key",
+            False,
+            "no key found — set ANTHROPIC_API_KEY, OPENROUTER_API_KEY, etc.",
+        )
+
+    # --- Python deps ---
+    for pkg, label in [("anthropic", "anthropic SDK"), ("typer", "typer")]:
+        spec = importlib.util.find_spec(pkg)
+        _check(label, spec is not None)
+
+    print("─" * 40)
+    if ok:
+        print("  All checks passed — ready to run.\n")
+    else:
+        print("  Fix the ✗ items above before running aevyra-forge tune.\n")
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
