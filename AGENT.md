@@ -33,8 +33,8 @@ Forge follows the AutoKernel-style autoresearch recipe:
 
 1. **Single artifact** — `recipe.yaml` — vLLM config + quant choice +
    kernel selection. The agent edits this one file.
-2. **Fast verifier** — `bench.py` — wraps vLLM's benchmark harness;
-   replays a workload trace and returns structured pass/fail + perf.
+2. **Fast verifier** — `bench.py` — replays the workload against a
+   running vLLM server; returns structured perf + accuracy.
 3. **Comprehensive playbook** — `playbook.md` — encodes serving
    expertise. The agent reads this to decide what to try next.
 4. **Tight keep/revert loop** — `~5-15 min` per experiment;
@@ -74,6 +74,27 @@ future implementation; their module files exist but raise
 
 ---
 
+## Implementation status
+
+| Module | Status | Notes |
+|---|---|---|
+| `recipe.py` | ✅ Done | Full YAML/dict round-trip, diff, lineage |
+| `workload.py` | ✅ Done | JSONL, synthetic, shared-prefix, concurrent generators; concurrency param; path metadata |
+| `playbook.py` | ✅ Done | Section parser, YAML front-matter, `format_for_agent` |
+| `result.py` | ✅ Done | `ForgeStore` + `ForgeRun`; run persistence, resume, TSV/JSON rendering |
+| `orchestrator.py` | ✅ Done | Main loop, `ForgeConfig`, `Experiment`; persists llm_provider/device/workload_path |
+| `cli.py` | ✅ Done | `aevyra-forge tune/resume/report/playbook`; `--device cuda\|rocm\|cpu`; GPU auto-detect |
+| `runner.py` | ✅ Done | vLLM subprocess lifecycle; 600s startup timeout |
+| `bench.py` | ✅ Done | Async concurrent replay; streaming TTFT measurement |
+| `agent.py` | ✅ Done | Single LLM call, structured JSON output |
+| `llm.py` | ✅ Done | `provider/model` factory; Anthropic + OpenAI-compat |
+| `config.py` | 🔧 Partial | Search space defined; mutation wired |
+| `quant.py` | 🚧 Stub | `NotImplementedError` — v0.2 |
+| `kernel.py` | 🚧 Stub | `NotImplementedError` — v0.3 |
+| `tests/` | ✅ Done | 79 unit tests; no GPU required |
+
+---
+
 ## Architecture
 
 ```
@@ -82,45 +103,41 @@ src/aevyra_forge/
 ├── recipe.py              # Recipe dataclass + YAML (de)serialization
 ├── playbook.py            # Playbook loader (parse .md, expose to agent)
 ├── orchestrator.py        # The search loop. Amdahl scheduler.
-├── agent.py               # The LLM-driven decision agent (reads playbook + trace, picks next experiment)
+├── agent.py               # The LLM-driven decision agent
 ├── bench.py               # vLLM benchmark wrapper. Workload replay, perf + accuracy.
-├── workload.py            # Workload trace ingestion (Langfuse, OTel, JSONL, synthetic fallback)
-├── runner.py              # vLLM server lifecycle: start, warmup, stop, restart-with-new-recipe.
-├── config.py              # Layer 1: vLLM config search space + mutation operators.
-├── quant.py               # Layer 2: quantization recipe selection.    [v0: stub]
-├── kernel.py              # Layer 3: AutoKernel integration hook.      [v0: stub]
-├── result.py              # Experiment logging (JSONL + TSV), audit trail.
-├── llm.py                 # LLMFn type + provider/model factory (Anthropic, OpenAI-compat, local).
-└── cli.py                 # CLI entrypoint (typer).
+├── workload.py            # Workload trace ingestion (JSONL, synthetic, Langfuse adapter)
+├── runner.py              # vLLM server lifecycle: start, warmup, stop, restart-with-new-recipe
+├── config.py              # Layer 1: vLLM config search space + mutation operators
+├── quant.py               # Layer 2: quantization recipe selection    [v0: stub]
+├── kernel.py              # Layer 3: AutoKernel integration hook      [v0: stub]
+├── result.py              # ForgeStore + ForgeRun: run persistence, resume, audit trail
+├── llm.py                 # LLMFn type + provider/model factory (Anthropic, OpenAI-compat, local)
+├── playbook.md            # Bundled default playbook (copied from playbooks/default.md)
+└── cli.py                 # CLI entrypoint (typer): aevyra-forge tune/resume/report/playbook
 ```
 
 Public API surface (from `aevyra_forge`):
 
 ```python
-Forge,            # main entry — Forge(model, hardware, workload, playbook).run()
 Recipe,           # the artifact
 Experiment,       # one keep/revert iteration
 Playbook,         # parsed playbook
-Orchestrator,    # the scheduler
+Orchestrator,     # the scheduler
+ForgeConfig,      # budget + termination knobs
 BenchResult,      # structured perf+accuracy output
 Workload,         # workload trace
-ForgeError,
+ForgeStore,       # multi-run directory manager
+ForgeRun,         # handle for one run's on-disk directory
 ```
 
-From `aevyra_forge.llm`:
+From `aevyra_forge.workload`:
 
 ```python
-LLMFn                                  # Callable[[str], str] type alias
-anthropic_llm, openai_llm              # factories
-```
-
-From `aevyra_forge.adapters`:
-
-```python
-workload_from_langfuse                # adapt Langfuse export → Workload
-workload_from_otel                    # OTel spans → Workload
-workload_from_jsonl                   # JSONL → Workload
-workload_synthetic                    # ShareGPT-shaped fallback when no trace available
+workload_from_jsonl               # JSONL → Workload (with concurrency param + path metadata)
+workload_from_langfuse            # Langfuse export → Workload (thin wrapper)
+workload_synthetic                # ShareGPT-shaped fallback
+workload_shared_prefix            # Prefix-cache benchmark workload
+workload_concurrent_synthetic     # High-concurrency stress workload
 ```
 
 ---
@@ -136,20 +153,21 @@ applies. Conceptually:
 @dataclass
 class Recipe:
     model: str                              # e.g. "meta-llama/Llama-3.1-8B-Instruct"
-    hardware: HardwareSpec                  # GPU type + count + memory
+    hardware: HardwareSpec                  # GPU vendor + type + count + memory
 
     # Layer 1: vLLM serving config
     config: VLLMConfig                      # max_num_seqs, KV cache fraction, etc.
 
     # Layer 2: quantization (v0: defaults only)
-    quant: QuantRecipe | None = None        # INT4/FP8/INT8, calibration data, etc.
+    quant: QuantRecipe = field(default_factory=QuantRecipe)
 
-    # Layer 3: custom kernels (v0: standard only)
-    kernels: list[KernelOverride] = []
+    # Layer 3: custom kernels (v0: empty)
+    kernels: list[KernelOverride] = field(default_factory=list)
 
     # Provenance
-    parent_id: str | None = None            # which recipe was this mutated from
+    parent_id: str | None = None            # which recipe this was mutated from
     generation: int = 0                     # how many keep/revert cycles deep
+    id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
 ```
 
 YAML-serializable. The user reads it. The user copies it into their own
@@ -157,59 +175,54 @@ deployment. That's the deliverable.
 
 ### The playbook — heuristics + search space, not LLM weights
 
-`playbook.md` is the agent's instructions. Like AutoKernel's
-`program.md`. It contains:
+`playbook.md` is the agent's instructions. It contains:
 
 - Description of the search space at each layer
-- Heuristics: "if KV cache utilization > 90%, try INT8 KV cache before
-  reducing max_num_seqs"
+- Heuristics: "if prefix_cache_hit_estimate > 0.3, try enable_prefix_caching first"
 - Hardware-specific guidance: "on MI300X, ROCM_AITER_FA is usually faster
   than the default flash-attn backend"
 - Forbidden combinations: "speculative decoding with TP > 4 is unstable
   on vLLM 0.x.y"
-- Workload-conditioned hints: "for chat workloads with high prefix-cache
-  hit rate, prefix_caching=True is almost always a win"
 - Termination conditions: "stop when 5 consecutive experiments don't
   improve score by 1%"
 
-The playbook ships as a markdown file. The agent reads it as part of
-its prompt. **The playbook is itself an optimization target for Reflex
-in v0.2+** — but for v0, it's hand-curated.
+The playbook ships bundled at `src/aevyra_forge/playbook.md` (copied
+from `playbooks/default.md`) so it works after `pip install` with no
+file path required.
+
+**The playbook is itself an optimization target for Reflex in v0.2+** —
+but for v0, it's hand-curated.
 
 ### The agent — reads trace, picks next experiment
 
-The agent is a small LLM-driven function:
+The agent is a single LLM call per experiment:
 
 ```python
-def propose_next_experiment(
-    history: list[Experiment],
-    playbook: Playbook,
-    current_recipe: Recipe,
-    workload: Workload,
-    llm: LLMFn,
-) -> Recipe:
-    """Read the experiment log and the playbook, propose a mutated recipe to try next.
-
-    The agent is a single LLM call (~1k tokens of prompt, returns JSON).
-    Cheap. Runs synchronously in the orchestrator loop.
-    """
+@dataclass
+class AgentDecision:
+    rationale: str
+    mutation: dict[str, Any]
+    expected_throughput_delta_pct: float | None
+    expected_accuracy_delta: float | None
+    raw_response: str
 ```
 
 It produces a JSON-shaped mutation:
 
 ```json
 {
-  "rationale": "Layer 1 has saturated for this workload — config-axis Pareto front hasn't moved in 5 experiments. Moving to Layer 2: try FP8 KV cache, which the playbook says typically gives 20% throughput on H100 chat workloads.",
+  "rationale": "Workload shows prefix_cache_hit_estimate=0.82. Enabling prefix caching should reduce TTFT significantly on repeated system prompts.",
   "mutation": {
-    "layer": "quant",
-    "changes": {"kv_cache_dtype": "fp8"}
+    "layer": "config",
+    "changes": {"enable_prefix_caching": true}
   },
-  "expected_outcome": "Throughput +15-25%, accuracy delta < 0.5%"
+  "expected_throughput_delta_pct": 25,
+  "expected_accuracy_delta": 0.0
 }
 ```
 
-The agent's rationale and prediction are logged. After bench, the
-*actual* outcome is compared to the predicted one — that's a signal
+The agent's rationale and prediction are logged per experiment. After
+bench, the actual outcome is stored alongside the prediction — a signal
 Reflex can use later to improve the playbook.
 
 ### The orchestrator — Amdahl, not Bayesian
@@ -223,161 +236,118 @@ Bayesian methods or evolutionary search. Forge does not. Instead:
    next experiment on, when to escalate from Layer 1 to Layer 2, when
    to stop.
 3. Scheduling uses Amdahl reasoning: if Layer 1 hasn't moved the score
-   in N experiments, the marginal value of another Layer 1 experiment
-   is low. Escalate to Layer 2.
+   in N experiments, escalate to Layer 2.
 
-The orchestrator owns:
-
-- The `Recipe` mutation queue
-- Layer-escalation decisions
-- Budget enforcement (max experiments, max wall-clock, max dollars)
-- Convergence detection (when to stop)
-- Statistical significance gates (don't keep a "win" that's within
-  noise)
+The orchestrator owns budget enforcement, convergence detection,
+layer-escalation decisions, and statistical significance gates.
 
 ### The verifier — vLLM benchmark, workload replay
 
-`bench.py` wraps vLLM's official benchmark script (`benchmark_serving.py`)
-plus an accuracy check. Returns:
+`bench.py` replays the workload against the running vLLM server using
+an async `httpx` client at full concurrency. Returns:
 
 ```python
 @dataclass
 class BenchResult:
-    # Performance
     throughput_tokens_per_sec: float
     p50_latency_ms: float
     p99_latency_ms: float
-    ttft_ms: float                          # time to first token
+    ttft_ms: float                          # time to first token (streaming)
     tpot_ms: float                          # time per output token
-
-    # Capacity
     peak_vram_mb: int
     max_concurrent_seqs: int
-
-    # Accuracy
-    accuracy_score: float | None            # lm-eval-harness or Verdict judge
+    accuracy_score: float | None
     accuracy_delta_vs_baseline: float | None
-
-    # Provenance
     recipe_id: str
     workload_id: str
     bench_duration_s: float
     status: Literal["PASS", "FAIL", "TIMEOUT", "CRASH"]
-    error: str | None
+    error: str | None = None
 ```
 
-**The score function** combines these into a single number the
-orchestrator can compare:
-
-```python
-score = throughput_tokens_per_sec * (1.0 if accuracy_delta_vs_baseline > -threshold else 0.0)
-```
-
-(Production version is more sophisticated — Pareto front handling,
-SLO constraints, cost weighting — but the v0 score is just
-`throughput subject to accuracy floor`.)
+The score function for v0: `throughput_tokens_per_sec` subject to
+`accuracy_score >= accuracy_floor`. Experiments that regress accuracy
+below the floor are not kept regardless of throughput gains.
 
 ### The runner — vLLM server lifecycle
 
-vLLM is a heavyweight server. Each experiment requires:
+Each experiment:
+1. Boot vLLM subprocess with the recipe's config applied.
+2. Wait up to 600 seconds for `/health` (first run includes weight
+   download).
+3. Run bench at `workload.concurrency` simultaneous in-flight requests.
+4. Stop the server (`SIGTERM` + drain).
 
-1. Build engine with the recipe's quantization (Layer 2 — expensive).
-2. Boot the server with the recipe's config (Layer 1).
-3. Warm up (a few hundred tokens through the engine).
-4. Run bench.
-5. Stop the server.
-
-The runner abstracts this. v0 supports `vllm` as the only engine.
-Engine-agnostic interface (TRT-LLM, SGLang, LMDeploy) is v0.3+.
+Startup timeout is 600s by default (`ForgeConfig.vllm_startup_timeout_s`)
+to handle first-run weight downloads on Colab.
 
 ### The workload — production trace or synthetic fallback
 
-A `Workload` is a stream of `(prompt, expected_output_length)` pairs
-with arrival timing. Sources, in order of preference:
+A `Workload` is a stream of `(prompt, expected_output_tokens)` pairs
+with arrival timing and a `concurrency` cap. Sources, in order of
+preference:
 
-1. **Production trace.** Customer's actual traffic, ideally
-   privacy-stripped. Adapters: `workload_from_langfuse`,
-   `workload_from_otel`, `workload_from_jsonl`.
-2. **Synthetic shape match.** Customer provides distribution summaries
-   (length histograms, concurrency patterns, prefix-cache hit rates);
-   Forge synthesizes a workload matching those shapes.
-3. **ShareGPT / public benchmark.** Fallback when the customer has
-   nothing. Used for the public Colab demo.
+1. **Production trace** — customer's actual traffic via JSONL.
+   `workload_from_jsonl` stores the resolved file path in
+   `metadata["path"]` so resume can find it without re-specifying
+   `--workload`.
+2. **Synthetic shape match** — `workload_shared_prefix`,
+   `workload_concurrent_synthetic` for specific benchmark patterns.
+3. **ShareGPT / public benchmark** — `workload_synthetic` fallback for
+   the Colab demo.
 
-A workload is replayed deterministically — same seed gives same
-arrival timing. That's important for run-to-run comparability.
+`concurrency` (default 8) is persisted to `config.json` at run start
+and restored on `aevyra-forge tune resume`. T4/A10: 8–16.
+A100/H100: 32–64.
+
+### Run persistence — ForgeStore and ForgeRun
+
+```
+.forge/
+  runs/
+    001_2026-05-13T04-10-00/
+      config.json          ← model, hardware, workload_path, concurrency, llm_provider, all ForgeConfig fields
+      experiments.jsonl    ← append-only log (one line per experiment)
+      experiments.tsv      ← human-readable table (re-written each append)
+      experiments.json     ← structured table for tooling (re-written each append)
+      best_recipe.yaml     ← best config so far (updated when score improves)
+      completed.json       ← written on clean finish; absent = interrupted
+    002_2026-05-13T14-05-00/
+      ...
+```
+
+`ForgeStore` manages the directory of runs. `ForgeRun` is a handle for
+one run's directory. A run with `experiments.jsonl` but no
+`completed.json` was interrupted and can be resumed.
+
+`aevyra-forge tune resume` calls `ForgeStore.find_incomplete_run()` and
+reads all parameters from `config.json` — **no CLI args needed**.
+
+### Hardware auto-detection
+
+`_detect_hardware(device)` in `cli.py` queries `nvidia-smi` (cuda) or
+`rocm-smi` (rocm) at runtime to auto-detect GPU name, VRAM, and count.
+No lookup table. Works for any GPU that the smi tool knows about.
+
+```python
+# cuda
+nvidia-smi --query-gpu=name,memory.total --format=csv,noheader,nounits
+# → "Tesla T4, 15360"  (name, MiB)
+
+# rocm
+rocm-smi --showproductname --showmeminfo vram --json
+# → {"card0": {"Card series": "AMD Instinct MI300X", "VRAM Total Memory (B)": "..."}}
+```
+
+`--device cpu` returns a placeholder `HardwareSpec` for dry-run use.
 
 ### Vendor neutrality — AMD MI300X is a first-class target
 
-Forge's CI runs benchmarks on **both** NVIDIA and AMD hardware. The
-recipe schema includes per-vendor fields where relevant (e.g.
-`attention_backend` differs: `flash-attn-3` on Hopper, `ROCM_AITER_FA`
-on MI300X). The playbook has per-hardware sections. The `quant` module
-handles FP8 differently for E4M3 (Hopper) vs. OCP FP8 (MI300X+).
-
-This is a **positioning** decision, not just a technical one. AMD
-customers are underserved by existing tooling. Forge wins by being
-the first autotuner that doesn't treat AMD as a port.
-
-### Colab/Kaggle-first distribution
-
-The `notebooks/` directory ships Colab-ready notebooks for:
-
-- **`forge_quickstart.ipynb`** — tune Llama-3.2-1B on a T4 (Colab free
-  tier). 12-hour overnight session finds a 30%+ improvement over
-  defaults.
-- **`forge_byo_workload.ipynb`** — bring your own workload trace
-  (Langfuse export), tune against it.
-- **`forge_amd_mi300x.ipynb`** — AMD-specific quickstart (requires
-  AMD Developer Cloud access).
-
-Each notebook has a `Run on Colab` badge in the README. Pin the package
-versions so notebooks don't bitrot.
-
----
-
-## v0 scope (what Sonnet builds first)
-
-**Build this. Stop here.**
-
-1. `Recipe`, `BenchResult`, `Experiment`, `Workload`, `Playbook`
-   dataclasses with YAML/JSON (de)serialization.
-2. `runner.VLLMRunner` — start/stop vLLM, apply Layer 1 config from a
-   recipe. Subprocess-based, no library hooks into vLLM yet.
-3. `bench.benchmark` — wraps `vllm bench serve` (or equivalent),
-   parses output into `BenchResult`. Accuracy validation via
-   lm-eval-harness as an optional second pass.
-4. `workload.from_jsonl`, `workload.synthetic` — minimal workload
-   ingestion. `from_langfuse` and `from_otel` are stubs that delegate
-   to the same JSONL converter for v0.
-5. `config.search_space` — enumerate Layer 1 knobs and their
-   permissible ranges. `config.mutate` — apply an agent-proposed
-   change to a Recipe, return the new Recipe.
-6. `agent.propose_next_experiment` — single LLM call, reads history +
-   playbook + workload summary, returns a JSON mutation. Provider
-   selection via `provider/model` string (same convention as Origin).
-7. `orchestrator.Orchestrator` — the main loop. `run()` returns a
-   final `Recipe` + full `Experiment` history.
-8. `result.ExperimentStore` — JSONL log per run, plus a
-   human-readable TSV summary (mirrors AutoKernel's pattern).
-9. `cli.main` — typer-based CLI. `forge tune --model X --hardware Y
-   --workload Z`.
-10. `playbooks/default.md` — initial playbook covering Layer 1 only.
-    Hand-written for v0.
-
-**Out of scope for v0:**
-
-- Layer 2 (`quant.py` raises NotImplementedError)
-- Layer 3 (`kernel.py` raises NotImplementedError)
-- Engines other than vLLM
-- Reflex hook to optimize the playbook
-- Web dashboard / UI
-- Multi-node / disaggregated serving tuning
-- Real Langfuse/OTel parsers (stubs delegate to JSONL)
-
-These exist as module files with docstrings + NotImplementedError so
-the architecture is visible from day one. Wiring them up is v0.2+
-work.
+The recipe schema includes per-vendor fields (`attention_backend` differs:
+`flash-attn-3` on Hopper, `ROCM_AITER_FA` on MI300X). The playbook has
+`## Hardware: nvidia` and `## Hardware: amd` sections filtered per run.
+The `quant` module will handle FP8 differently for E4M3 (Hopper) vs.
+OCP FP8 (MI300X+) in v0.2.
 
 ---
 
@@ -388,10 +358,12 @@ work.
 ```python
 @dataclass
 class HardwareSpec:
-    vendor: Literal["nvidia", "amd", "intel", "google", "other"]
-    gpu_type: str                            # "H100", "MI300X", "L40S", "T4", ...
-    count: int                               # number of GPUs
+    vendor: Literal["nvidia", "amd", "intel", "google", "other", "cpu"]
+    gpu_type: str                            # "T4", "A100", "MI300X", ...
+    count: int
     memory_gb_per_gpu: int
+
+    def label(self) -> str:                  # "nvidia/T4x1"
 
 @dataclass
 class VLLMConfig:
@@ -400,20 +372,20 @@ class VLLMConfig:
     max_num_batched_tokens: int = 8192
     block_size: int = 16
     gpu_memory_utilization: float = 0.9
+    max_model_len: int | None = None
     enable_prefix_caching: bool = False
     enable_chunked_prefill: bool = True
-    swap_space: int = 4                       # GiB
+    swap_space: int = 4
     kv_cache_dtype: Literal["auto", "fp8", "fp16", "bf16"] = "auto"
     tensor_parallel_size: int = 1
     pipeline_parallel_size: int = 1
     speculative_model: str | None = None
     num_speculative_tokens: int = 0
-    attention_backend: str | None = None      # vendor-specific
-    # ... add fields as the playbook references them
+    attention_backend: str | None = None     # vendor-specific
 
 @dataclass
 class QuantRecipe:
-    """Layer 2. v0: defaults only; raises if mutated."""
+    """Layer 2. v0: defaults only."""
     method: Literal["fp16", "bf16", "int4_awq", "int4_gptq", "fp8_e4m3", "int8"] = "bf16"
     kv_cache_quant: Literal["none", "fp8", "int8"] = "none"
     calibration_dataset: str | None = None
@@ -422,70 +394,29 @@ class QuantRecipe:
 @dataclass
 class KernelOverride:
     """Layer 3. v0: never populated."""
-    op_name: str                              # "attention", "rmsnorm", ...
-    kernel_source_path: str                   # path to .py or .cu
+    op_name: str
+    kernel_source_path: str
 
 @dataclass
 class Recipe:
     model: str
     hardware: HardwareSpec
-    config: VLLMConfig
+    config: VLLMConfig = field(default_factory=VLLMConfig)
     quant: QuantRecipe = field(default_factory=QuantRecipe)
     kernels: list[KernelOverride] = field(default_factory=list)
     parent_id: str | None = None
     generation: int = 0
-    id: str = ""                              # auto-assigned
+    id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
 
+    def to_dict(self) -> dict[str, Any]: ...
     def to_yaml(self) -> str: ...
     @classmethod
+    def from_dict(cls, d: dict) -> "Recipe": ...
+    @classmethod
     def from_yaml(cls, s: str) -> "Recipe": ...
+    def diff(self, other: "Recipe") -> dict[str, Any]:
+        """Return VLLMConfig fields that differ between self and other."""
 ```
-
-### `bench.py`
-
-```python
-@dataclass
-class BenchResult: ...   # see above
-
-def benchmark(
-    *,
-    server_url: str,           # http://localhost:8000
-    workload: Workload,
-    accuracy_check: bool = True,
-    timeout_s: int = 600,
-) -> BenchResult:
-    """Replay `workload` against the running server. Return structured perf+accuracy."""
-```
-
-Implementation note: shell out to `vllm bench serve` or implement the
-replay loop directly via the OpenAI-compatible client. Whichever is
-more robust. The script must capture: throughput, TTFT, TPOT, p50,
-p99, peak VRAM. Accuracy uses lm-eval-harness for math/code tasks or
-a Verdict judge for chat.
-
-### `runner.py`
-
-```python
-class VLLMRunner:
-    """Manage a vLLM server's lifecycle for one experiment."""
-
-    def __init__(self, recipe: Recipe, work_dir: Path): ...
-
-    def start(self) -> None:
-        """Boot vLLM with recipe.config applied. Block until /health returns 200."""
-
-    def stop(self) -> None:
-        """SIGTERM + drain. Wait for process exit."""
-
-    def url(self) -> str:
-        """Return the OpenAI-compatible server URL."""
-
-    def __enter__(self): self.start(); return self
-    def __exit__(self, *_): self.stop()
-```
-
-vLLM is invoked as a subprocess (`vllm serve {model} --max-num-seqs ...`).
-Logs are captured and surfaced on crash.
 
 ### `workload.py`
 
@@ -493,8 +424,8 @@ Logs are captured and surfaced on crash.
 @dataclass
 class WorkloadRequest:
     prompt: str
-    expected_output_tokens: int               # for capacity planning
-    arrival_offset_s: float                   # seconds since workload start
+    expected_output_tokens: int
+    arrival_offset_s: float
     metadata: dict[str, Any] = field(default_factory=dict)
 
 @dataclass
@@ -502,39 +433,158 @@ class Workload:
     requests: list[WorkloadRequest]
     duration_s: float
     metadata: dict[str, Any] = field(default_factory=dict)
+    concurrency: int = 1                   # max simultaneous in-flight during bench
 
+    def min_context_tokens(self) -> int:
+        """Minimum max_model_len needed to serve this workload."""
     def summary(self) -> dict[str, Any]:
-        """Return a dict the agent prompt can read: length distributions,
-        prefix-cache hit estimate, concurrency profile, etc."""
+        """Distributions the agent prompt reads (p50/p99 lengths, RPS, prefix hit estimate)."""
 
-def from_jsonl(path: Path) -> Workload: ...
-def from_langfuse(path: Path) -> Workload: ...    # v0: thin wrapper around from_jsonl
-def from_otel(spans: list[dict]) -> Workload: ...  # v0: stub
-def synthetic(
-    *,
-    n_requests: int = 1000,
-    avg_input_tokens: int = 512,
-    avg_output_tokens: int = 128,
-    seed: int = 0,
-) -> Workload: ...
+def workload_from_jsonl(path: str | Path, *, concurrency: int = 8) -> Workload:
+    """Load from JSONL. Stores resolved path in metadata["path"] for resume."""
+
+def workload_from_langfuse(path: str | Path) -> Workload:
+    """Thin wrapper around workload_from_jsonl."""
+
+def workload_from_otel(spans: list[dict]) -> Workload:
+    """v0: stub — raises NotImplementedError."""
+
+def workload_synthetic(*, n_requests=1000, avg_input_tokens=512, avg_output_tokens=128,
+                       duration_s=60.0, seed=0) -> Workload: ...
+
+def workload_shared_prefix(*, n_requests=200, concurrency=8, prefix_tokens=512,
+                           query_tokens=64, output_tokens=128, duration_s=60.0, seed=0) -> Workload:
+    """All requests share a long common prefix — benchmarks prefix caching."""
+
+def workload_concurrent_synthetic(*, n_requests=200, concurrency=16, avg_input_tokens=256,
+                                  avg_output_tokens=128, duration_s=60.0, seed=0) -> Workload:
+    """High-concurrency workload — stresses max_num_seqs and batching knobs."""
 ```
 
-### `config.py`
+### `result.py`
 
 ```python
-def search_space(hardware: HardwareSpec) -> dict[str, list[Any]]:
-    """Return the legal value ranges for each VLLMConfig field on this hardware.
+class ForgeRun:
+    """Handle for one optimization run's on-disk directory."""
 
-    Some fields are vendor-conditional (e.g. attention_backend choices).
-    """
+    path: Path
+    run_id: str
 
-def mutate(recipe: Recipe, mutation: dict[str, Any]) -> Recipe:
-    """Apply an agent-proposed mutation. Validate against search_space.
+    def save_config(self, *, model, hardware_label, workload_id, forge_config_dict,
+                    llm_provider="", device="cuda", workload_path="", concurrency=8) -> None:
+        """Write config.json once at run start."""
 
-    `mutation` is the JSON the agent emitted, e.g.:
-        {"layer": "config", "changes": {"max_num_seqs": 512, "enable_prefix_caching": true}}
-    """
+    def config(self) -> dict[str, Any] | None: ...
+    def append(self, exp: Experiment) -> None:
+        """Atomic JSONL append + re-render TSV, JSON table, best_recipe.yaml."""
+    def save_completion(self, *, best_score, n_kept, n_total, wall_time_s) -> None:
+        """Write completed.json — marks the run as cleanly finished."""
+    def history(self) -> list[Experiment]: ...
+    def best(self) -> Experiment | None: ...
+    def is_complete(self) -> bool: ...
+    def is_interrupted(self) -> bool: ...
+    def status(self) -> str: ...        # "running" | "interrupted" | "completed"
+    def render_tsv(self) -> str: ...
+    def summary_row(self) -> dict[str, Any]: ...
+
+# Backward-compat alias — old code that imports ExperimentStore still works
+ExperimentStore = ForgeRun
+
+class ForgeStore:
+    """Manages a directory of Forge optimization runs."""
+
+    def __init__(self, root: str | Path = ".forge"): ...
+    def new_run(self) -> ForgeRun: ...
+    def get_run(self, run_id: str) -> ForgeRun | None: ...
+    def latest_run(self) -> ForgeRun | None: ...
+    def find_incomplete_run(self) -> ForgeRun | None:
+        """Return the most recent interrupted run — used by `aevyra-forge tune resume`."""
+    def list_runs(self) -> list[dict[str, Any]]: ...
 ```
+
+### `orchestrator.py`
+
+```python
+@dataclass
+class Experiment:
+    id: str
+    recipe: Recipe
+    bench_result: BenchResult | None = None
+    agent_decision: AgentDecision | None = None
+    score: float | None = None
+    kept: bool = False
+    duration_s: float = 0.0
+    started_at: float = 0.0
+    ended_at: float = 0.0
+    llm_tokens: int = 0
+
+@dataclass
+class ForgeConfig:
+    max_experiments: int = 50
+    max_wall_clock_hours: float = 12.0
+    max_dollars: float | None = None
+    accuracy_floor: float = 0.99
+    min_improvement_pct: float = 1.0
+    convergence_window: int = 5
+    layer_escalation: bool = True
+    exploration_interval: int = 4
+    dry_run: bool = False
+    vllm_startup_timeout_s: int = 600      # 10 min — first start includes weight download
+
+class Orchestrator:
+    def __init__(
+        self,
+        *,
+        model: str,
+        hardware: HardwareSpec,
+        workload: Workload,
+        playbook: Playbook,
+        llm: LLMFn,
+        store: ForgeStore,
+        forge_config: ForgeConfig = ForgeConfig(),
+        llm_provider: str = "",            # persisted to config.json for resume
+        device: str = "cuda",              # persisted to config.json for resume
+        workload_path: str = "",           # persisted to config.json for resume
+    ): ...
+
+    def run(self) -> tuple[Recipe, list[Experiment]]:
+        """Start a new run. Returns best recipe + full history."""
+
+    def resume(self) -> tuple[Recipe, list[Experiment]]:
+        """Continue an interrupted run from its ForgeStore state."""
+```
+
+### `cli.py`
+
+```bash
+# Start a new run
+aevyra-forge tune \
+  --model meta-llama/Llama-3.2-1B-Instruct \
+  --device cuda \
+  --workload examples/sample_workload.jsonl \
+  --concurrency 8 \
+  --llm anthropic/claude-sonnet-4-6 \
+  --max-experiments 50 \
+  --max-hours 12.0
+
+# Resume latest interrupted run (zero args — all config read from config.json)
+aevyra-forge tune resume
+
+# View results
+aevyra-forge report .forge/
+
+# Inspect the bundled playbook
+aevyra-forge playbook show
+aevyra-forge playbook validate
+```
+
+`--device cuda` triggers `nvidia-smi` auto-detection of GPU name, VRAM,
+and count. `--device rocm` uses `rocm-smi`. `--device cpu` returns a
+placeholder (use with `--dry-run`).
+
+All CLI flags except `--model`, `--workload`, and `--device` have
+defaults and are persisted to `config.json` at run start so
+`aevyra-forge tune resume` needs zero arguments.
 
 ### `agent.py`
 
@@ -546,104 +596,60 @@ class AgentDecision:
     expected_throughput_delta_pct: float | None
     expected_accuracy_delta: float | None
     raw_response: str
+```
 
-def propose_next_experiment(
+The prompt template (`_AGENT_PROMPT`) includes: workload summary,
+hardware spec, memory budget, current recipe YAML, last N experiment
+diffs + scores, search space, and the full playbook. Output is strict
+JSON. The agent makes exactly one LLM call per experiment.
+
+### `bench.py`
+
+```python
+async def _bench_async(server_url: str, workload: Workload, ...) -> BenchResult: ...
+
+def benchmark(
     *,
-    history: list[Experiment],
-    playbook: Playbook,
-    current_recipe: Recipe,
+    server_url: str,           # http://localhost:8000
     workload: Workload,
-    llm: LLMFn,
-) -> AgentDecision: ...
+    recipe_id: str = "",
+    timeout_s: int = 300,
+) -> BenchResult:
+    """Replay workload against the running server. Returns structured perf+accuracy."""
 ```
 
-The prompt template lives in `_AGENT_PROMPT` at module top. Sections:
+Requests are dispatched concurrently up to `workload.concurrency`
+in-flight using `asyncio` + `httpx.AsyncClient`. Streaming
+(`stream=True`) is used so TTFT is measured from the first SSE chunk.
 
-- Workload summary (length distribution, concurrency, prefix-cache hit
-  estimate)
-- Hardware spec
-- Current recipe (YAML, terse)
-- Last 10 experiments (recipe diff, score, status)
-- Playbook (verbatim)
-- Instructions: emit JSON with `rationale`, `mutation`,
-  `expected_throughput_delta_pct`, `expected_accuracy_delta`.
-
-### `orchestrator.py`
+### `runner.py`
 
 ```python
-@dataclass
-class Experiment:
-    id: str
-    recipe: Recipe
-    bench_result: BenchResult | None
-    agent_decision: AgentDecision | None
-    score: float | None
-    kept: bool                                # True if better than parent
-    duration_s: float
-    started_at: float
-    ended_at: float
+class VLLMRunner:
+    def __init__(self, recipe: Recipe, work_dir: Path,
+                 startup_timeout_s: int = 600): ...
 
-@dataclass
-class ForgeConfig:
-    """Budget + termination knobs."""
-    max_experiments: int = 50
-    max_wall_clock_hours: float = 12.0
-    max_dollars: float | None = None
-    accuracy_floor: float = 0.99              # vs baseline
-    min_improvement_pct: float = 1.0
-    convergence_window: int = 5               # stop after N stagnant experiments
-    layer_escalation: bool = True             # Auto-jump from L1 → L2 → L3
-
-class Orchestrator:
-    def __init__(
-        self,
-        *,
-        model: str,
-        hardware: HardwareSpec,
-        workload: Workload,
-        playbook: Playbook,
-        llm: LLMFn,
-        store: ExperimentStore,
-        forge_config: ForgeConfig = ForgeConfig(),
-    ): ...
-
-    def run(self) -> tuple[Recipe, list[Experiment]]:
-        """Main loop. Returns the best recipe found + full history."""
-```
-
-### `result.py`
-
-```python
-class ExperimentStore:
-    """Append-only JSONL log of experiments, plus a TSV summary."""
-
-    def __init__(self, run_dir: Path): ...
-    def append(self, exp: Experiment) -> None: ...
-    def best(self) -> Experiment | None: ...
-    def history(self) -> list[Experiment]: ...
-    def render_tsv(self) -> str: ...
-```
-
-### `cli.py`
-
-```bash
-forge tune \
-  --model meta-llama/Llama-3.1-8B-Instruct \
-  --hardware nvidia/A100 \
-  --workload sample_workload.jsonl \
-  --playbook playbooks/default.md \
-  --model-agent openrouter/anthropic/claude-sonnet-4-5 \
-  --output runs/2026-05-11/
-
-forge resume runs/2026-05-11/
-forge report runs/2026-05-11/  # rendered TSV + Pareto plot
+    def start(self) -> None:
+        """Boot vLLM subprocess. Block until /health returns 200."""
+    def stop(self) -> None:
+        """SIGTERM + drain. Wait for process exit."""
+    def url(self) -> str:
+        """Return the OpenAI-compatible server URL."""
+    def __enter__(self): self.start(); return self
+    def __exit__(self, *_): self.stop()
 ```
 
 ### `llm.py`
 
-Identical contract to Origin's `aevyra_origin.llm`. Same factories,
-same `provider/model` string convention. **Copy the module from
-Origin; don't reinvent.** (Eventually extract to `aevyra-common`.)
+Same `provider/model` string convention as `aevyra-origin` and
+`aevyra-reflex`:
+
+```python
+LLMFn = Callable[[str], str]
+
+def resolve_llm(provider_model: str) -> LLMFn:
+    """Parse "anthropic/claude-sonnet-4-6", "openai/gpt-4o", "ollama/qwen3:8b", etc."""
+```
 
 ### `playbook.py`
 
@@ -651,13 +657,53 @@ Origin; don't reinvent.** (Eventually extract to `aevyra-common`.)
 @dataclass
 class Playbook:
     raw_markdown: str
-    sections: dict[str, str]
-    metadata: dict[str, Any]
+    sections: dict[str, str] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
+    source_path: Path | None = None
 
-def load_playbook(path: Path) -> Playbook: ...
+def load_playbook(path: str | Path) -> Playbook:
+    """Parse ## headings into sections. Parse YAML front-matter."""
+
 def format_for_agent(playbook: Playbook, hardware: HardwareSpec, layer: str) -> str:
-    """Filter the playbook to the sections relevant for this hardware + layer."""
+    """Filter to sections relevant for this hardware + layer.
+
+    Always includes: Search space, Heuristics, Forbidden, Termination.
+    Also includes: Hardware: {vendor} if present.
+    """
 ```
+
+---
+
+## v0 scope
+
+### Done ✅
+
+1. `Recipe`, `BenchResult`, `Experiment`, `Workload`, `Playbook` dataclasses
+   with YAML/JSON (de)serialization.
+2. `runner.VLLMRunner` — subprocess-based vLLM lifecycle.
+3. `bench.benchmark` — async concurrent workload replay, streaming TTFT.
+4. `workload_from_jsonl`, synthetic generators — with concurrency param
+   and path metadata for zero-arg resume.
+5. `agent.propose_next_experiment` — single LLM call, structured JSON.
+6. `orchestrator.Orchestrator` — main loop + `resume()`.
+7. `result.ForgeStore` + `ForgeRun` — run persistence, multi-run
+   directory, resume detection.
+8. `cli.main` — `aevyra-forge tune/resume/report/playbook`; `--device`
+   with auto-detection via `nvidia-smi`/`rocm-smi`.
+9. `playbooks/default.md` + bundled `src/aevyra_forge/playbook.md`.
+10. `examples/sample_workload.jsonl` — 50-example starter workload.
+11. `tests/` — 79 unit tests (workload, recipe, result, playbook, cli).
+12. CI — lint (ruff + mypy) + unit tests on Python 3.10/3.11/3.12.
+
+### Out of scope for v0
+
+- Layer 2 (`quant.py` raises `NotImplementedError`)
+- Layer 3 (`kernel.py` raises `NotImplementedError`)
+- Engines other than vLLM
+- Reflex hook to optimize the playbook
+- Web dashboard / UI
+- Multi-node / disaggregated serving tuning
+- Real Langfuse/OTel parsers (stub delegates to JSONL)
 
 ---
 
@@ -679,19 +725,17 @@ def format_for_agent(playbook: Playbook, hardware: HardwareSpec, layer: str) -> 
 ## Aevyra integration
 
 Forge composes with the rest of the stack, but does **not** depend on
-it at runtime (Witness is the only runtime dep, and only for tracing
-the agent's reasoning).
+it at runtime.
 
-- **Witness**: every agent call, every bench run is captured as a
+- **Witness**: every agent call, every bench run can be captured as a
   span. `Forge.run()` returns the `AgentTrace` alongside the final
   recipe.
 - **Origin**: when an experiment fails (CRASH, regression, accuracy
-  below floor), the captured trace is handed to Origin to find which
-  decision in the agent's rationale was the root cause. The
-  attribution is stored alongside the experiment.
+  below floor), the captured trace can be handed to Origin to find
+  which decision in the agent's rationale was the root cause.
 - **Reflex**: in v0.2+, Reflex consumes the experiment history (the
-  agent's predictions vs. actual outcomes) and proposes playbook
-  edits. The playbook IS the optimization target.
+  agent's predictions vs. actual outcomes) and proposes playbook edits.
+  The playbook IS the optimization target.
 - **Verdict**: optional accuracy judge for chat workloads.
   lm-eval-harness for math/code is the default.
 
@@ -710,12 +754,11 @@ Optional extras:
 
 - `[openai]` — OpenRouter / OpenAI-compat agent backend
 - `[vllm]` — vLLM is the v0 target engine, installed by the user
-- `[amd]` — extras for ROCm targets (Quark, AITER)
+- `[amd]` — extras for ROCm targets (Quark, AITER) — placeholder
 - `[dev]` — pytest, ruff, mypy, typer
 
 **Keep the core dependency-light.** Forge should `pip install` cleanly
-in a Colab notebook in under 30 seconds. Anything that pulls heavy
-ML-stack deps (`torch`, `transformers`) goes behind an extra.
+in a Colab notebook in under 30 seconds.
 
 ---
 
@@ -724,28 +767,34 @@ ML-stack deps (`torch`, `transformers`) goes behind an extra.
 ```bash
 pip install -e ".[dev]"
 
-# Day-to-day (no GPU needed — runner is stubbed in tests)
-forge tune --model gpt-2 --hardware nvidia/T4 \
-  --workload examples/sharegpt_small.jsonl \
-  --playbook playbooks/default.md \
-  --model-agent ollama/qwen3:8b \
-  --dry-run
+# Unit tests (no GPU needed)
+pytest tests/ -v
 
-# With a real GPU
-forge tune --model meta-llama/Llama-3.2-1B-Instruct \
-  --hardware nvidia/A100 \
-  --workload your_trace.jsonl \
-  --model-agent anthropic/claude-sonnet-4-5
+# Lint
+ruff check . && ruff format --check .
+
+# Dry-run on CPU (no vLLM, synthetic bench results)
+aevyra-forge tune \
+  --model meta-llama/Llama-3.2-1B-Instruct \
+  --device cpu \
+  --workload examples/sample_workload.jsonl \
+  --dry-run \
+  --max-experiments 3
+
+# Full run on a real GPU (Colab T4)
+aevyra-forge tune \
+  --model meta-llama/Llama-3.2-1B-Instruct \
+  --device cuda \
+  --workload examples/sample_workload.jsonl \
+  --max-experiments 10
+
+# Resume after interruption
+aevyra-forge tune resume
 ```
-
-The `--dry-run` flag is important: it makes runner + bench mock-shaped
-so the orchestrator + agent loop can be developed against deterministic
-fixtures without burning GPU hours. **Build dry-run support from day
-one.**
 
 ---
 
-## Collab-friendly notes
+## Contributing
 
 This repo is being built collaboratively. Read these before opening a
 PR:
@@ -764,9 +813,8 @@ PR:
   works on one vendor needs a parallel implementation (or a clear
   fallback) for the others, or an explicit gate. Don't merge
   NVIDIA-only paths without an AMD plan in the same PR.
-- **No tests for v0 scaffolding.** Test scaffolding will land once
-  the modules have real bodies. Lint and type-check should always
-  pass.
+- **Tests are required.** GPU-dependent paths (bench, runner,
+  orchestrator with real vLLM) are tested in Colab. Everything else
+  must have a unit test in `tests/`.
 - **Don't break the Colab quickstart.** It's the first thing every
-  evaluator runs. CI runs the Colab notebook end-to-end on every
-  PR (against a tiny model on a CPU-only runner with mocked vLLM).
+  evaluator runs. Pin package versions so notebooks don't bitrot.
