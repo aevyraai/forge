@@ -144,6 +144,7 @@ def workload_from_jsonl(path: str | Path, *, concurrency: int = 8) -> Workload:
     duration_s = requests[-1].arrival_offset_s + 1.0 if requests else 1.0
     wl = Workload(requests=requests, duration_s=duration_s)
     wl.concurrency = concurrency
+    wl.metadata["path"] = str(Path(path).resolve())
     return wl
 
 
