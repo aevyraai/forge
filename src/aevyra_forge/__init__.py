@@ -51,7 +51,7 @@ from aevyra_forge.workload import (
     workload_synthetic,
 )
 
-__version__ = "0.0.1"
+__version__ = "0.1.0"
 
 
 class ForgeError(Exception):
