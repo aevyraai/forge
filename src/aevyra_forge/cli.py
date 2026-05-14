@@ -59,7 +59,9 @@ def main() -> None:
         action: Optional[str] = typer.Argument(
             None, help="Optional subcommand: 'resume' to continue an interrupted run."
         ),
-        model: Optional[str] = typer.Option(None, "--model", "-m", help="HuggingFace model ID or local path"),
+        model: Optional[str] = typer.Option(
+            None, "--model", "-m", help="HuggingFace model ID or local path"
+        ),
         device: str = typer.Option(
             "cuda",
             "--device",
@@ -82,13 +84,20 @@ def main() -> None:
             "Providers: anthropic, openai, openrouter, groq, together, "
             "fireworks, deepinfra, mistral, ollama, lmstudio.",
         ),
-        concurrency: int = typer.Option(8, "--concurrency", "-c", help="Concurrent requests during benchmarking. T4/A10: 8–16, A100/H100: 32–64."),
+        concurrency: int = typer.Option(
+            8,
+            "--concurrency",
+            "-c",
+            help="Concurrent requests during benchmarking. T4/A10: 8–16, A100/H100: 32–64.",
+        ),
         max_experiments: int = typer.Option(50, help="Max number of experiments"),
         max_hours: float = typer.Option(12.0, help="Max wall-clock hours"),
         max_dollars: Optional[float] = typer.Option(None, help="Max LLM spend in USD"),
         accuracy_floor: float = typer.Option(0.99, help="Min acceptable accuracy (0-1)"),
         min_improvement_pct: float = typer.Option(1.0, help="Min improvement % to keep a recipe"),
-        run_dir: Optional[Path] = typer.Option(None, help="ForgeStore root directory (default: .forge)"),
+        run_dir: Optional[Path] = typer.Option(
+            None, help="ForgeStore root directory (default: .forge)"
+        ),
         dry_run: bool = typer.Option(
             False, "--dry-run", help="Skip vLLM; use synthetic bench results"
         ),
@@ -215,20 +224,24 @@ def _detect_hardware(device: str):
             # Query name + memory for every GPU in one call
             result = subprocess.run(
                 ["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader,nounits"],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
             if result.returncode != 0:
                 raise RuntimeError(result.stderr.strip())
-            lines = [l.strip() for l in result.stdout.strip().splitlines() if l.strip()]
+            lines = [line.strip() for line in result.stdout.strip().splitlines() if line.strip()]
             if not lines:
                 raise RuntimeError("nvidia-smi returned no GPUs")
             # Each line: "Tesla T4, 15360"
-            names, mibs = zip(*(l.split(",", 1) for l in lines))
+            names, mibs = zip(*(line.split(",", 1) for line in lines))
             gpu_type = names[0].strip()
             memory_gb = round(int(mibs[0].strip()) / 1024)
             count = len(lines)
             log.info("Detected %d × %s with %d GB VRAM each", count, gpu_type, memory_gb)
-            return HardwareSpec(vendor="nvidia", gpu_type=gpu_type, count=count, memory_gb_per_gpu=memory_gb)
+            return HardwareSpec(
+                vendor="nvidia", gpu_type=gpu_type, count=count, memory_gb_per_gpu=memory_gb
+            )
         except Exception as exc:
             raise RuntimeError(
                 f"Could not detect NVIDIA GPU (--device cuda): {exc}. "
@@ -239,11 +252,14 @@ def _detect_hardware(device: str):
         try:
             result = subprocess.run(
                 ["rocm-smi", "--showproductname", "--showmeminfo", "vram", "--json"],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
             if result.returncode != 0:
                 raise RuntimeError(result.stderr.strip())
             import json as _json
+
             data = _json.loads(result.stdout)
             cards = {k: v for k, v in data.items() if k.startswith("card")}
             if not cards:
@@ -251,10 +267,12 @@ def _detect_hardware(device: str):
             first = next(iter(cards.values()))
             gpu_type = first.get("Card series", first.get("Card model", "AMD GPU")).strip()
             bytes_per_gpu = int(first.get("VRAM Total Memory (B)", 0))
-            memory_gb = round(bytes_per_gpu / (1024 ** 3))
+            memory_gb = round(bytes_per_gpu / (1024**3))
             count = len(cards)
             log.info("Detected %d × %s with %d GB VRAM each", count, gpu_type, memory_gb)
-            return HardwareSpec(vendor="amd", gpu_type=gpu_type, count=count, memory_gb_per_gpu=memory_gb)
+            return HardwareSpec(
+                vendor="amd", gpu_type=gpu_type, count=count, memory_gb_per_gpu=memory_gb
+            )
         except Exception as exc:
             raise RuntimeError(
                 f"Could not detect AMD GPU (--device rocm): {exc}. "
@@ -294,7 +312,6 @@ def _run_tune(
     run_dir: "Path | None",
     dry_run: bool,
 ) -> None:
-    import json
 
     from aevyra_forge.llm import resolve_llm
     from aevyra_forge.orchestrator import ForgeConfig, Orchestrator
@@ -375,6 +392,7 @@ def _run_resume(*, run_dir: "Path | None") -> None:
         )
         sys.exit(1)
     from aevyra_forge.workload import workload_from_jsonl
+
     workload = workload_from_jsonl(Path(workload_path), concurrency=concurrency)
 
     pb_path = _default_playbook_path()
@@ -382,6 +400,7 @@ def _run_resume(*, run_dir: "Path | None") -> None:
         playbook = load_playbook(pb_path)
     else:
         from aevyra_forge.playbook import Playbook
+
         playbook = Playbook(raw_markdown="")
 
     llm_provider = cfg.get("llm_provider", "anthropic/claude-sonnet-4-6")
