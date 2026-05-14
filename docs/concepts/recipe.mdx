@@ -1,0 +1,78 @@
+---
+title: Recipe
+description: The single artifact Forge proposes, mutates, and keeps or reverts.
+---
+
+A **recipe** is the complete deployment specification Forge searches
+over. Every experiment produces exactly one recipe; the best one is
+written to `best_recipe.yaml` at the end of a run.
+
+## Structure
+
+```yaml
+model: meta-llama/Llama-3.2-1B-Instruct
+hardware:
+  vendor: nvidia
+  gpu_type: Tesla T4
+  count: 1
+  memory_gb_per_gpu: 15
+config:                          # Layer 1 — vLLM serving args
+  max_num_seqs: 256
+  max_num_batched_tokens: 8192
+  block_size: 16
+  gpu_memory_utilization: 0.9
+  enable_prefix_caching: true
+  enable_chunked_prefill: true
+  swap_space: 4
+  kv_cache_dtype: auto
+  tensor_parallel_size: 1
+  pipeline_parallel_size: 1
+quant:                           # Layer 2 — quantization (v0: defaults only)
+  method: bf16
+  kv_cache_quant: none
+kernels: []                      # Layer 3 — custom kernels (v0: empty)
+generation: 3
+parent_id: a1b2c3d4
+id: e5f6a7b8
+```
+
+## Layers
+
+**Layer 1 — Config** (`config:`) is the primary search space in v0.
+Forge tunes vLLM serving arguments that control batching, memory, and
+caching behaviour. These have the highest leverage per experiment
+because they require no recompilation.
+
+**Layer 2 — Quantization** (`quant:`) is scaffolded but not yet
+implemented. In v0.2+ Forge will tune INT4/FP8/INT8 methods and KV
+cache precision jointly with Layer 1.
+
+**Layer 3 — Kernel synthesis** (`kernels:`) hooks into AutoKernel for
+custom op synthesis. Planned for v0.3+.
+
+## Key VLLMConfig fields
+
+| Field | vLLM default | What it does |
+|---|---|---|
+| `max_num_seqs` | 256 | Max concurrent sequences in a batch |
+| `max_num_batched_tokens` | 8192 | Max tokens processed per forward pass |
+| `enable_prefix_caching` | false | Cache KV state for repeated prefixes |
+| `enable_chunked_prefill` | true | Break long prefills into chunks |
+| `gpu_memory_utilization` | 0.9 | Fraction of GPU VRAM for KV cache |
+| `kv_cache_dtype` | auto | KV cache precision (auto/fp8/fp16/bf16) |
+| `tensor_parallel_size` | 1 | Number of GPUs for tensor parallelism |
+
+## Lineage
+
+Each recipe records its `parent_id` and `generation`. This lets Forge
+detect convergence, build a diff between any two recipes, and render
+a clean audit trail.
+
+```python
+from aevyra_forge.recipe import Recipe
+
+r1 = Recipe.from_yaml(open("best_recipe.yaml").read())
+diff = r1.diff(baseline)
+# {"enable_prefix_caching": {"from": False, "to": True},
+#  "max_num_seqs": {"from": 256, "to": 128}}
+```

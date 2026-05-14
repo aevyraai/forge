@@ -45,6 +45,8 @@ openai = ["openai>=2.31.0"]
 vllm = ["vllm>=0.10"]
 # AMD-specific extras (ROCm, Quark, AITER) — placeholder for future
 amd = []
+# Notebook execution (CI smoke test + Colab)
+notebooks = ["pandas>=2.0", "nbconvert>=7.0", "nbclient>=0.9", "ipykernel>=6.0"]
 # Everything
 all = ["openai>=2.31.0", "vllm>=0.10"]
 # Development

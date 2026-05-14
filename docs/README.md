@@ -3,16 +3,19 @@
 User-facing documentation in `.mdx`. Pulled by the aevyra.ai docs site
 (Mintlify). Same pattern as `aevyra-origin/docs/`.
 
+## Written
+
+- `quickstart.mdx` — `pip install` → first tuned recipe in 15 min
+- `concepts/recipe.mdx` — the artifact (VLLMConfig, layers, lineage)
+- `concepts/playbook.mdx` — the agent's instruction manual
+
 ## Planned
 
 - `introduction.mdx` — what Forge is, where it fits in the Aevyra stack
-- `quickstart.mdx` — `pip install` → first tuned recipe in 15 min
 - `tutorial-colab-quickstart.mdx` — walk through the Colab notebook
 - `tutorial-amd-mi300x.mdx` — AMD-specific walkthrough
 - `tutorial-byo-workload.mdx` — bring your own trace
-- `concepts/recipe.mdx` — the artifact
-- `concepts/playbook.mdx` — the agent's instructions
-- `concepts/orchestrator.mdx` — Amdahl scheduling
+- `concepts/orchestrator.mdx` — Amdahl scheduling, budget, convergence
 - `api/recipe.mdx` — Recipe / VLLMConfig / QuantRecipe reference
 - `api/orchestrator.mdx` — Orchestrator / ForgeConfig reference
 - `api/bench.mdx` — BenchResult schema
