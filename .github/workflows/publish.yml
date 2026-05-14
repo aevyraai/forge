@@ -1,19 +1,23 @@
-name: Publish
+name: Publish to PyPI
 
 on:
-  push:
-    tags:
-      - "v*"
   workflow_dispatch:
-
-permissions:
-  contents: read
-  id-token: write  # required for trusted publishing (OIDC)
+    inputs:
+      target:
+        description: "Publish target"
+        required: true
+        default: "testpypi"
+        type: choice
+        options:
+          - testpypi
+          - pypi
 
 jobs:
-  build:
-    name: Build distribution
+  publish:
     runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.target }}
+    permissions:
+      id-token: write  # required for OIDC trusted publishing
 
     steps:
       - uses: actions/checkout@v6
@@ -22,33 +26,20 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install build tools
-        run: pip install build
+      - run: pip install build
 
-      - name: Build wheel and sdist
-        run: python -m build
+      - run: python -m build
 
-      - name: Upload dist artefacts
-        uses: actions/upload-artifact@v4
+      - name: Publish to TestPyPI
+        if: github.event.inputs.target == 'testpypi'
+        uses: pypa/gh-action-pypi-publish@release/v1
         with:
-          name: dist
-          path: dist/
-
-  publish:
-    name: Publish to PyPI
-    needs: build
-    runs-on: ubuntu-latest
-    environment: pypi  # requires a "pypi" environment configured in repo settings
-
-    steps:
-      - name: Download dist artefacts
-        uses: actions/download-artifact@v4
-        with:
-          name: dist
-          path: dist/
+          repository-url: https://test.pypi.org/legacy/
 
       - name: Publish to PyPI
+        if: github.event.inputs.target == 'pypi'
         uses: pypa/gh-action-pypi-publish@release/v1
-        # Uses OIDC trusted publishing — no API token needed.
-        # Configure at: https://pypi.org/manage/account/publishing/
-        # Publisher settings: owner=aevyraai, repo=forge, workflow=publish.yml
+        # OIDC trusted publishing — no API token needed.
+        # Setup: pypi.org → Publishing → Add pending publisher
+        #   Owner: aevyraai  Repo: forge  Workflow: publish.yml  Environment: pypi
+        # Same for test.pypi.org with environment: testpypi

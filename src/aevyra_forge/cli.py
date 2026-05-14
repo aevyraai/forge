@@ -589,11 +589,11 @@ def _run_doctor(*, device: str) -> None:
 
     # --- API keys ---
     providers = {
-        "ANTHROPIC_API_KEY": "Anthropic",
-        "OPENAI_API_KEY": "OpenAI",
-        "OPENROUTER_API_KEY": "OpenRouter",
-        "TOGETHER_API_KEY": "Together AI",
-        "GROQ_API_KEY": "Groq",
+        "ANTHROPIC_API_KEY": "Anthropic",  # pragma: allowlist secret
+        "OPENAI_API_KEY": "OpenAI",  # pragma: allowlist secret
+        "OPENROUTER_API_KEY": "OpenRouter",  # pragma: allowlist secret
+        "TOGETHER_API_KEY": "Together AI",  # pragma: allowlist secret
+        "GROQ_API_KEY": "Groq",  # pragma: allowlist secret
     }
     found_keys = [name for name in providers if os.environ.get(name)]
     if found_keys:

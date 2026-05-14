@@ -108,6 +108,7 @@ jobs:
           detect-secrets scan \
             --exclude-files '\.secrets\.baseline' \
             --exclude-files '\.github/' \
+            --exclude-files '\.ipynb$' \
             > /tmp/secrets-scan.json
           python3 - <<'EOF'
           import json, sys

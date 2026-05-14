@@ -227,14 +227,14 @@ def resolve_llm(model_str: str) -> LLMFn:
         return openai_llm(
             model=model,
             base_url="http://localhost:11434/v1",
-            api_key="ollama",  # ollama ignores the key but openai SDK requires one
+            api_key="ollama",  # ollama ignores the key but openai SDK requires one  # pragma: allowlist secret
         )
 
     if provider == "lmstudio":
         return openai_llm(
             model=model,
             base_url="http://localhost:1234/v1",
-            api_key="lm-studio",
+            api_key="lm-studio",  # pragma: allowlist secret
         )
 
     # Unknown provider — try as a plain OpenAI-compatible model string
