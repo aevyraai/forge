@@ -43,6 +43,7 @@ htmlcov/
 runs/
 *.tsv
 *.jsonl
+!examples/*.jsonl
 trace.json
 result.json
 recipe.yaml

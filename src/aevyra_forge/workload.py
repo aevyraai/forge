@@ -110,12 +110,17 @@ class Workload:
         }
 
 
-def workload_from_jsonl(path: str | Path) -> Workload:
+def workload_from_jsonl(path: str | Path, *, concurrency: int = 8) -> Workload:
     """Load a workload from a JSONL file.
 
     Expected line format::
 
         {"prompt": "...", "expected_output_tokens": 128, "arrival_offset_s": 0.0}
+
+    Args:
+        concurrency: Max simultaneous in-flight requests during benchmarking.
+            Defaults to 8, which exercises ``max_num_seqs`` on T4/A10-class GPUs.
+            Set higher (32–64) for A100/H100.
     """
     path = Path(path)
     requests: list[WorkloadRequest] = []
@@ -137,7 +142,9 @@ def workload_from_jsonl(path: str | Path) -> Workload:
             )
         )
     duration_s = requests[-1].arrival_offset_s + 1.0 if requests else 1.0
-    return Workload(requests=requests, duration_s=duration_s)
+    wl = Workload(requests=requests, duration_s=duration_s)
+    wl.concurrency = concurrency
+    return wl
 
 
 def workload_shared_prefix(

@@ -56,23 +56,23 @@ def main() -> None:
     # ------------------------------------------------------------------
     @app.command()
     def tune(
-        model: str = typer.Option(..., "--model", "-m", help="HuggingFace model ID or local path"),
-        hardware: str = typer.Option(
-            ...,
-            "--hardware",
-            "-H",
-            help="Hardware spec: vendor/gpu_type[xN] e.g. nvidia/H100x8, amd/MI300X",
+        action: Optional[str] = typer.Argument(
+            None, help="Optional subcommand: 'resume' to continue an interrupted run."
+        ),
+        model: Optional[str] = typer.Option(
+            None, "--model", "-m", help="HuggingFace model ID or local path"
+        ),
+        device: str = typer.Option(
+            "cuda",
+            "--device",
+            "-d",
+            help="Device backend: cuda (NVIDIA), rocm (AMD), or cpu (dry-run only).",
         ),
         workload_jsonl: Optional[Path] = typer.Option(
             None,
             "--workload",
             "-w",
             help="Path to workload JSONL (prompt + expected_output_tokens per line)",
-        ),
-        workload_synthetic: bool = typer.Option(
-            False,
-            "--workload-synthetic",
-            help="Generate a synthetic workload instead of loading one",
         ),
         playbook: Optional[Path] = typer.Option(
             None, "--playbook", help="Path to playbook markdown. Defaults to built-in playbook."
@@ -84,24 +84,50 @@ def main() -> None:
             "Providers: anthropic, openai, openrouter, groq, together, "
             "fireworks, deepinfra, mistral, ollama, lmstudio.",
         ),
+        concurrency: int = typer.Option(
+            8,
+            "--concurrency",
+            "-c",
+            help="Concurrent requests during benchmarking. T4/A10: 8–16, A100/H100: 32–64.",
+        ),
         max_experiments: int = typer.Option(50, help="Max number of experiments"),
         max_hours: float = typer.Option(12.0, help="Max wall-clock hours"),
         max_dollars: Optional[float] = typer.Option(None, help="Max LLM spend in USD"),
         accuracy_floor: float = typer.Option(0.99, help="Min acceptable accuracy (0-1)"),
         min_improvement_pct: float = typer.Option(1.0, help="Min improvement % to keep a recipe"),
-        run_dir: Optional[Path] = typer.Option(None, help="Directory for run artifacts"),
+        run_dir: Optional[Path] = typer.Option(
+            None, help="ForgeStore root directory (default: .forge)"
+        ),
         dry_run: bool = typer.Option(
             False, "--dry-run", help="Skip vLLM; use synthetic bench results"
         ),
         verbose: bool = typer.Option(False, "--verbose", "-v"),
     ) -> None:
-        """Run an overnight autotune session and emit the best recipe."""
+        """Run or resume an autotune session.
+
+        \b
+        aevyra-forge tune            Start a new run
+        aevyra-forge tune resume     Resume the latest interrupted run
+        """
         _setup_logging(verbose)
+
+        if action == "resume":
+            _run_resume(run_dir=run_dir)
+            return
+
+        if action is not None:
+            raise typer.BadParameter(f"Unknown subcommand {action!r}. Did you mean 'resume'?")
+
+        if model is None:
+            raise typer.BadParameter("--model is required when starting a new run.")
+        if workload_jsonl is None:
+            raise typer.BadParameter("--workload is required when starting a new run.")
+
         _run_tune(
             model=model,
-            hardware_str=hardware,
+            device=device,
             workload_jsonl=workload_jsonl,
-            workload_synthetic=workload_synthetic,
+            concurrency=concurrency,
             playbook_path=playbook,
             llm_provider=llm_provider,
             max_experiments=max_experiments,
@@ -112,21 +138,6 @@ def main() -> None:
             run_dir=run_dir,
             dry_run=dry_run,
         )
-
-    # ------------------------------------------------------------------
-    # forge resume
-    # ------------------------------------------------------------------
-    @app.command()
-    def resume(
-        run_dir: Path = typer.Argument(..., help="Run directory from a previous forge tune"),
-        llm_provider: str = typer.Option(
-            "anthropic/claude-sonnet-4-6", "--llm", help="LLM for the agent."
-        ),
-        verbose: bool = typer.Option(False, "--verbose", "-v"),
-    ) -> None:
-        """Resume an interrupted autotune run."""
-        _setup_logging(verbose)
-        _run_resume(run_dir=run_dir, llm_provider=llm_provider)
 
     # ------------------------------------------------------------------
     # forge report
@@ -188,50 +199,87 @@ def _setup_logging(verbose: bool) -> None:
     )
 
 
-def _parse_hardware(hardware_str: str):
-    """Parse 'nvidia/H100x8' or 'amd/MI300X' into HardwareSpec."""
+def _detect_hardware(device: str):
+    """Auto-detect GPU type, count, and VRAM from the device backend.
+
+    Args:
+        device: One of ``cuda``, ``rocm``, or ``cpu``.
+
+    Returns:
+        A :class:`~aevyra_forge.recipe.HardwareSpec` populated from
+        ``nvidia-smi`` (cuda), ``rocm-smi`` (rocm), or a CPU placeholder.
+    """
+    import subprocess
     from aevyra_forge.recipe import HardwareSpec
 
-    parts = hardware_str.split("/", 1)
-    if len(parts) != 2:
-        raise ValueError(
-            f"Hardware must be vendor/gpu_type[xN], got: {hardware_str!r}. "
-            "Examples: nvidia/H100x8, amd/MI300X, nvidia/A100"
-        )
-    vendor, gpu_spec = parts
-    count = 1
-    if "x" in gpu_spec:
-        gpu_type, count_str = gpu_spec.rsplit("x", 1)
-        try:
-            count = int(count_str)
-        except ValueError:
-            gpu_type = gpu_spec
-    else:
-        gpu_type = gpu_spec
+    log = logging.getLogger(__name__)
+    device = device.lower().strip()
 
-    # Infer VRAM from GPU type
-    mem_map = {
-        "H100": 80,
-        "H200": 141,
-        "B100": 192,
-        "B200": 192,
-        "A100": 80,
-        "A6000": 48,
-        "A10": 24,
-        "T4": 16,
-        "MI300X": 192,
-        "MI250X": 128,
-    }
-    memory_gb = next(
-        (v for k, v in mem_map.items() if k.upper() in gpu_type.upper()),
-        24,
-    )
-    return HardwareSpec(
-        vendor=vendor.lower(),
-        gpu_type=gpu_type,
-        count=count,
-        memory_gb_per_gpu=memory_gb,
-    )
+    if device == "cpu":
+        log.info("Device: cpu — no GPU detected; dry-run mode recommended.")
+        return HardwareSpec(vendor="cpu", gpu_type="cpu", count=1, memory_gb_per_gpu=0)
+
+    if device == "cuda":
+        try:
+            # Query name + memory for every GPU in one call
+            result = subprocess.run(
+                ["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader,nounits"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(result.stderr.strip())
+            lines = [line.strip() for line in result.stdout.strip().splitlines() if line.strip()]
+            if not lines:
+                raise RuntimeError("nvidia-smi returned no GPUs")
+            # Each line: "Tesla T4, 15360"
+            names, mibs = zip(*(line.split(",", 1) for line in lines))
+            gpu_type = names[0].strip()
+            memory_gb = round(int(mibs[0].strip()) / 1024)
+            count = len(lines)
+            log.info("Detected %d × %s with %d GB VRAM each", count, gpu_type, memory_gb)
+            return HardwareSpec(
+                vendor="nvidia", gpu_type=gpu_type, count=count, memory_gb_per_gpu=memory_gb
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"Could not detect NVIDIA GPU (--device cuda): {exc}. "
+                "Is nvidia-smi available? Try --device rocm or --device cpu."
+            ) from exc
+
+    if device == "rocm":
+        try:
+            result = subprocess.run(
+                ["rocm-smi", "--showproductname", "--showmeminfo", "vram", "--json"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(result.stderr.strip())
+            import json as _json
+
+            data = _json.loads(result.stdout)
+            cards = {k: v for k, v in data.items() if k.startswith("card")}
+            if not cards:
+                raise RuntimeError("rocm-smi returned no cards")
+            first = next(iter(cards.values()))
+            gpu_type = first.get("Card series", first.get("Card model", "AMD GPU")).strip()
+            bytes_per_gpu = int(first.get("VRAM Total Memory (B)", 0))
+            memory_gb = round(bytes_per_gpu / (1024**3))
+            count = len(cards)
+            log.info("Detected %d × %s with %d GB VRAM each", count, gpu_type, memory_gb)
+            return HardwareSpec(
+                vendor="amd", gpu_type=gpu_type, count=count, memory_gb_per_gpu=memory_gb
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"Could not detect AMD GPU (--device rocm): {exc}. "
+                "Is rocm-smi available? Try --device cuda or --device cpu."
+            ) from exc
+
+    raise ValueError(f"Unknown device {device!r}. Choose: cuda, rocm, cpu.")
 
 
 def _default_playbook_path() -> Path:
@@ -251,9 +299,9 @@ def _make_run_dir(run_dir: "Path | None") -> Path:
 def _run_tune(
     *,
     model: str,
-    hardware_str: str,
-    workload_jsonl: "Path | None",
-    workload_synthetic: bool,
+    device: str,
+    workload_jsonl: "Path",
+    concurrency: int,
     playbook_path: "Path | None",
     llm_provider: str,
     max_experiments: int,
@@ -264,29 +312,17 @@ def _run_tune(
     run_dir: "Path | None",
     dry_run: bool,
 ) -> None:
-    import json
 
     from aevyra_forge.llm import resolve_llm
     from aevyra_forge.orchestrator import ForgeConfig, Orchestrator
     from aevyra_forge.playbook import load_playbook
-    from aevyra_forge.result import ExperimentStore
-    from aevyra_forge.workload import workload_from_jsonl, workload_synthetic as make_synthetic
+    from aevyra_forge.result import ForgeStore
+    from aevyra_forge.workload import workload_from_jsonl
 
-    hardware = _parse_hardware(hardware_str)
-    actual_run_dir = _make_run_dir(run_dir)
-    actual_run_dir.mkdir(parents=True, exist_ok=True)
+    hardware = _detect_hardware(device)
 
     # Workload
-    if workload_jsonl is not None:
-        workload = workload_from_jsonl(workload_jsonl)
-    elif workload_synthetic:
-        workload = make_synthetic()
-    else:
-        logging.getLogger(__name__).warning(
-            "No workload provided. Using synthetic workload. "
-            "For production runs, pass --workload <path.jsonl>"
-        )
-        workload = make_synthetic()
+    workload = workload_from_jsonl(workload_jsonl, concurrency=concurrency)
 
     # Playbook
     pb_path = playbook_path or _default_playbook_path()
@@ -301,25 +337,7 @@ def _run_tune(
         playbook = load_playbook(pb_path)
 
     llm = resolve_llm(llm_provider)
-    store = ExperimentStore(actual_run_dir)
-
-    # Save run config
-    config_path = actual_run_dir / "config.json"
-    config_path.write_text(
-        json.dumps(
-            {
-                "model": model,
-                "hardware": hardware_str,
-                "workload": str(workload_jsonl) if workload_jsonl else "synthetic",
-                "llm": llm_provider,
-                "max_experiments": max_experiments,
-                "max_hours": max_hours,
-                "accuracy_floor": accuracy_floor,
-                "dry_run": dry_run,
-            },
-            indent=2,
-        )
-    )
+    store = ForgeStore(run_dir or ".forge")
 
     forge_config = ForgeConfig(
         max_experiments=max_experiments,
@@ -328,7 +346,6 @@ def _run_tune(
         accuracy_floor=accuracy_floor,
         min_improvement_pct=min_improvement_pct,
         dry_run=dry_run,
-        work_dir=actual_run_dir,
     )
 
     orchestrator = Orchestrator(
@@ -339,40 +356,44 @@ def _run_tune(
         llm=llm,
         store=store,
         forge_config=forge_config,
+        llm_provider=llm_provider,
+        device=device,
+        workload_path=str(workload_jsonl.resolve()),
     )
 
-    print(f"\n🔨 Forge starting — run dir: {actual_run_dir}\n")
     best_recipe, history = orchestrator.run()
-
-    best_path = actual_run_dir / "best_recipe.yaml"
-    print(f"\n✓ Done. {len(history)} experiments. Best recipe → {best_path}\n")
+    print(f"\n✓ Done — {len(history)} experiments\n")
     print(best_recipe.to_yaml())
 
 
-def _run_resume(*, run_dir: Path, llm_provider: str) -> None:
-    import json
-
+def _run_resume(*, run_dir: "Path | None") -> None:
     from aevyra_forge.llm import resolve_llm
     from aevyra_forge.orchestrator import ForgeConfig, Orchestrator
     from aevyra_forge.playbook import load_playbook
-    from aevyra_forge.result import ExperimentStore
-    from aevyra_forge.workload import workload_synthetic as make_synthetic
+    from aevyra_forge.result import ForgeStore
 
-    config_path = run_dir / "config.json"
-    if not config_path.exists():
-        print(f"✗ No config.json in {run_dir}", file=sys.stderr)
+    store = ForgeStore(run_dir or ".forge")
+    incomplete = store.find_incomplete_run()
+    if incomplete is None:
+        print("✗ No interrupted run found to resume.", file=sys.stderr)
         sys.exit(1)
 
-    cfg = json.loads(config_path.read_text())
-    hardware = _parse_hardware(cfg["hardware"])
+    cfg = incomplete.config() or {}
+    device = cfg.get("device", "cuda")
+    hardware = _detect_hardware(device)
 
-    workload_path = cfg.get("workload")
-    if workload_path and workload_path != "synthetic":
-        from aevyra_forge.workload import workload_from_jsonl
+    workload_path = cfg.get("workload_path", "")
+    concurrency = cfg.get("concurrency", 8)
+    if not workload_path:
+        print(
+            "✗ Run config is missing workload_path — cannot resume.\n"
+            "  Start a new run with --workload instead.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    from aevyra_forge.workload import workload_from_jsonl
 
-        workload = workload_from_jsonl(Path(workload_path))
-    else:
-        workload = make_synthetic()
+    workload = workload_from_jsonl(Path(workload_path), concurrency=concurrency)
 
     pb_path = _default_playbook_path()
     if pb_path.exists():
@@ -382,15 +403,15 @@ def _run_resume(*, run_dir: Path, llm_provider: str) -> None:
 
         playbook = Playbook(raw_markdown="")
 
+    llm_provider = cfg.get("llm_provider", "anthropic/claude-sonnet-4-6")
     llm = resolve_llm(llm_provider)
-    store = ExperimentStore(run_dir)
 
+    forge_cfg = cfg.get("forge_config", {})
     forge_config = ForgeConfig(
-        max_experiments=cfg.get("max_experiments", 50),
-        max_wall_clock_hours=cfg.get("max_hours", 12.0),
-        accuracy_floor=cfg.get("accuracy_floor", 0.99),
-        dry_run=cfg.get("dry_run", False),
-        work_dir=run_dir,
+        max_experiments=forge_cfg.get("max_experiments", 50),
+        max_wall_clock_hours=forge_cfg.get("max_wall_clock_hours", 12.0),
+        accuracy_floor=forge_cfg.get("accuracy_floor", 0.99),
+        dry_run=forge_cfg.get("dry_run", False),
     )
 
     orchestrator = Orchestrator(
@@ -401,25 +422,31 @@ def _run_resume(*, run_dir: Path, llm_provider: str) -> None:
         llm=llm,
         store=store,
         forge_config=forge_config,
+        llm_provider=llm_provider,
+        device=device,
     )
 
-    print(f"\n🔨 Forge resuming — run dir: {run_dir}\n")
     best_recipe, history = orchestrator.resume()
-    print(f"\n✓ Done. {len(history)} total experiments.\n")
+    print(f"\n✓ Done — {len(history)} total experiments\n")
     print(best_recipe.to_yaml())
 
 
 def _run_report(*, run_dir: Path) -> None:
-    from aevyra_forge.result import ExperimentStore
+    from aevyra_forge.result import ForgeStore
 
-    store = ExperimentStore(run_dir)
-    history = store.history()
-    if not history:
-        print(f"No experiments found in {run_dir}")
+    store = ForgeStore(run_dir or ".forge")
+    run = store.latest_run()
+    if run is None:
+        print(f"No runs found in {run_dir or '.forge'}")
         return
 
-    best = store.best()
-    print(f"\n=== Forge Report: {run_dir} ===\n")
+    history = run.history()
+    if not history:
+        print(f"No experiments found in {run.path}")
+        return
+
+    best = run.best()
+    print(f"\n=== Forge Report: {run.path} ===\n")
     print(f"Total experiments: {len(history)}")
     if best:
         print(f"Best score:        {best.score:.4f}")
@@ -430,7 +457,7 @@ def _run_report(*, run_dir: Path) -> None:
             print(f"Throughput:        {br.throughput_tokens_per_sec:.1f} tok/s")
             print(f"P99 latency:       {br.p99_latency_ms:.0f} ms")
     print()
-    print(store.render_tsv())
+    print(run.render_tsv())
 
 
 if __name__ == "__main__":
