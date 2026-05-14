@@ -51,9 +51,12 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
-      - run: pip install -e ".[dev]" nbconvert nbclient ipykernel
+      - run: pip install -e ".[dev,notebooks]"
       - run: python -m ipykernel install --user --name python3
-      - run: jupyter nbconvert --to notebook --execute notebooks/forge_quickstart.ipynb
+      - run: |
+          jupyter nbconvert --to notebook --execute \
+            --ExecutePreprocessor.skip_cells_with_tag=skip-ci \
+            notebooks/forge_quickstart.ipynb
 
   # ---------------------------------------------------------------------------
   # Tests — unit tests for workload, recipe, result, playbook, cli helpers.
