@@ -1,6 +1,7 @@
 # aevyra-forge
 
 [![CI](https://github.com/aevyraai/forge/actions/workflows/ci.yml/badge.svg)](https://github.com/aevyraai/forge/actions/workflows/ci.yml)
+[![Security](https://github.com/aevyraai/forge/actions/workflows/security.yml/badge.svg)](https://github.com/aevyraai/forge/actions/workflows/security.yml)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Docs](https://img.shields.io/badge/docs-aevyra.mintlify.app-6E3FF3)](https://aevyra.mintlify.app/forge/)
 
