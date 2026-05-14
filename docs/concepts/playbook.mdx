@@ -1,0 +1,92 @@
+---
+title: Playbook
+description: The agent's instruction manual — encodes serving expertise as heuristics.
+---
+
+The **playbook** is a markdown file that tells the agent *what to try*
+and *why*. It is the primary lever for domain expertise: when you know
+something about your hardware or workload that the agent doesn't,
+you add a heuristic to the playbook.
+
+The default playbook lives at `src/aevyra_forge/playbook.md` and is
+bundled into the package so it works after `pip install`.
+
+## Structure
+
+A playbook is a markdown file with `##` section headings. Sections
+Forge always includes in the agent prompt:
+
+| Section | Purpose |
+|---|---|
+| `## Search space` | Legal values for each config field |
+| `## Heuristics` | Rules of thumb for what to try first |
+| `## Forbidden` | Config combinations that crash or regress |
+| `## Termination` | When to stop searching |
+
+Hardware-specific sections are included only for the matching vendor:
+
+```markdown
+## Hardware: nvidia
+
+On T4 (16 GB), set gpu_memory_utilization ≤ 0.85.
+Prefer enable_chunked_prefill=true for long-context workloads.
+
+## Hardware: amd
+
+On MI300X, use attention_backend=ROCM_AITER_FA for best TTFT.
+```
+
+## YAML front-matter
+
+```yaml
+---
+version: 1
+layers: [config, quant]
+---
+```
+
+`version` is used by Reflex (the prompt optimizer) to track playbook
+revisions.
+
+## Custom playbook
+
+Pass `--playbook path/to/playbook.md` to override the built-in:
+
+```bash
+aevyra-forge tune \
+  --model mymodel \
+  --device cuda \
+  --workload workload.jsonl \
+  --playbook my_playbook.md
+```
+
+## Validate a playbook
+
+```bash
+aevyra-forge playbook validate my_playbook.md
+# ✓ Playbook loaded OK (6 sections)
+
+aevyra-forge playbook show my_playbook.md
+# prints all sections
+```
+
+## Programmatic access
+
+```python
+from aevyra_forge.playbook import load_playbook, format_for_agent
+from aevyra_forge.recipe import HardwareSpec
+
+pb = load_playbook("playbook.md")
+hw = HardwareSpec(vendor="nvidia", gpu_type="A100", count=4, memory_gb_per_gpu=80)
+text = format_for_agent(pb, hw, layer="config")
+print(text)
+```
+
+`format_for_agent` filters to only the sections relevant for the
+current hardware and layer, keeping the agent prompt focused.
+
+## Reflex integration
+
+In v0.2+, Reflex will read the experiment history and propose playbook
+edits — turning empirical findings (e.g. "prefix caching always helped
+on this hardware") into permanent heuristics. For now, edits are manual.
